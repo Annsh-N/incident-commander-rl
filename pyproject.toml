@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "incident-commander-env"
+version = "0.1.0"
+description = "Deterministic Incident Commander reinforcement learning environment."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+gym = ["gymnasium>=0.29,<2"]
+test = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
