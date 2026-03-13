@@ -13,14 +13,13 @@ def test_no_shortcut_resolution() -> None:
     )
     env.step(
         {
-            "type": "post_update",
+            "type": "get_logs",
             "args": {
-                "audience": "internal",
-                "template_id": "initial",
-                "fields": {
-                    "summary": "Investigating checkout failures.",
-                    "impact": "Checkout unavailable.",
-                },
+                "service": "checkout-service",
+                "query": "pricing_url",
+                "window_steps": 3,
+                "limit": 5,
+                "page": 0,
             },
         }
     )
@@ -44,4 +43,22 @@ def test_no_shortcut_resolution() -> None:
     assert done is True
     assert reward < 0.0
     assert info["resolution"] == "unstable"
+    assert "no_concrete_change" in info["failure_reasons"]
     assert obs["status"] == "failed"
+
+
+def test_apply_mitigation_only_proposes_no_system_change() -> None:
+    env = IncidentCommanderEnv()
+    env.reset(seed=123)
+
+    env.step(
+        {
+            "type": "apply_mitigation",
+            "args": {"mitigation_id": "revert_pricing_url_config"},
+        }
+    )
+
+    assert env.state is not None
+    assert env.state.proposed_mitigations == ["revert_pricing_url_config"]
+    assert env.state.causal_fix_step is None
+    assert env.state.resolved_state is False

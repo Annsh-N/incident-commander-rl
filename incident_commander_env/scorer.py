@@ -58,7 +58,12 @@ def score_step(
     done = False
     action_type = action["type"]
     args = action["args"]
-    info_updates: dict[str, Any] = {"resolution": None, "debug": [], "unsafe_attempt": state.unsafe_attempt}
+    info_updates: dict[str, Any] = {
+        "resolution": None,
+        "debug": [],
+        "unsafe_attempt": state.unsafe_attempt,
+        "failure_reasons": [],
+    }
 
     signature = _action_signature(action)
     state.action_signature_counts[signature] = state.action_signature_counts.get(signature, 0) + 1
@@ -94,13 +99,40 @@ def score_step(
             reward -= 0.2
             state.unsafe_attempt = True
             info_updates["unsafe_attempt"] = True
-            info_updates["debug"].append("Forbidden mitigation attempted.")
+            info_updates["debug"].append("Forbidden mitigation proposed.")
+    elif action_type in {"restart_service", "scale_service"}:
+        executed_mitigation = state.last_executed_mitigation_id
+        if executed_mitigation in scenario.forbidden_mitigations:
+            reward -= 0.2
+            state.unsafe_attempt = True
+            info_updates["unsafe_attempt"] = True
+            info_updates["debug"].append("Forbidden concrete service change attempted.")
     elif action_type == "declare_resolved":
         if not state.incident_created or not state.updates_posted:
             reward -= 0.1
             info_updates["debug"].append(
                 "Resolution declaration lacked incident creation or communication updates."
             )
+        failure_reasons: list[str] = []
+        if not state.incident_created:
+            failure_reasons.append("no_incident_created")
+        if not state.updates_posted:
+            failure_reasons.append("no_comms_update")
+        if not state.proposed_mitigations:
+            failure_reasons.append("no_proposed_mitigation")
+        if state.causal_fix_step is None:
+            failure_reasons.append("no_concrete_change")
+        else:
+            if not state.causal_change_planned:
+                failure_reasons.append("change_not_preplanned")
+            if not state.causal_change_evidence_met:
+                failure_reasons.append("no_evidence_before_change")
+            if state.current_step <= state.causal_fix_step:
+                failure_reasons.append("no_wait_after_change")
+        if not state.confirmations["error_rate"]:
+            failure_reasons.append("error_rate_not_confirmed")
+        if not state.confirmations["p95_latency"]:
+            failure_reasons.append("p95_latency_not_confirmed")
 
         root_cause_matches = args["root_cause_id"] == scenario.ground_truth_root_cause_id
         mitigation_matches = args["mitigation_id"] == state.causal_mitigation_id
@@ -116,12 +148,15 @@ def score_step(
                 info_updates["debug"].append(
                     "Resolution declared before the environment reached stable resolved state."
                 )
+                info_updates["failure_reasons"] = failure_reasons
             elif not root_cause_matches:
                 info_updates["resolution"] = "wrong_root_cause"
                 info_updates["debug"].append("Incorrect root cause in resolution declaration.")
+                info_updates["failure_reasons"] = ["wrong_root_cause"]
             else:
                 info_updates["resolution"] = "wrong_mitigation"
                 info_updates["debug"].append("Incorrect mitigation in resolution declaration.")
+                info_updates["failure_reasons"] = ["wrong_mitigation"]
     elif action_type == "declare_failed":
         done = True
         info_updates["resolution"] = "failed"

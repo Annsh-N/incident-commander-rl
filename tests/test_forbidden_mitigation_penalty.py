@@ -17,3 +17,4 @@ def test_forbidden_mitigation_penalty() -> None:
     assert info["unsafe_attempt"] is True
     assert env.state is not None
     assert env.state.unsafe_attempt is True
+    assert env.state.causal_fix_step is None

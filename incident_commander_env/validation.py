@@ -93,6 +93,8 @@ def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str |
         "view_runbook",
         "apply_config_patch",
         "rollback_deploy",
+        "restart_service",
+        "scale_service",
         "run_health_check",
         "confirm_metrics_normalized",
     }:
@@ -142,6 +144,9 @@ def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str |
         current_version = env_state.deploy_versions[args["service"]]
         if args["from_version"] != current_version:
             return False, f"from_version must match current version {current_version}"
+    elif action_type == "scale_service":
+        if args["replicas"] == env_state.service_replicas[args["service"]]:
+            return False, f"replicas already set to {args['replicas']} for {args['service']}"
     elif action_type == "confirm_metrics_normalized":
         if args["metric"] not in known_metrics[args["service"]]:
             return False, f"metric '{args['metric']}' is not available for {args['service']}"

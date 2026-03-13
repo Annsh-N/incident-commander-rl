@@ -47,6 +47,8 @@ ACTION_TYPES: tuple[str, ...] = (
     "toggle_feature_flag",
     "apply_config_patch",
     "rollback_deploy",
+    "restart_service",
+    "scale_service",
     "run_health_check",
     "wait",
     "confirm_metrics_normalized",
@@ -220,7 +222,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "apply_mitigation",
         "mitigation",
         {"mitigation_id": ArgumentSpec("str", description="Mitigation identifier.")},
-        "Apply a named mitigation.",
+        "Propose a mitigation plan; does not change system state directly.",
     ),
     "toggle_feature_flag": ActionSpec(
         "toggle_feature_flag",
@@ -249,6 +251,21 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             "to_version": ArgumentSpec("str", description="Target version."),
         },
         "Rollback a deployment.",
+    ),
+    "restart_service": ActionSpec(
+        "restart_service",
+        "mitigation",
+        {"service": ArgumentSpec("str", description="Service name.")},
+        "Execute a service restart.",
+    ),
+    "scale_service": ActionSpec(
+        "scale_service",
+        "mitigation",
+        {
+            "service": ArgumentSpec("str", description="Service name."),
+            "replicas": ArgumentSpec("int", min_value=1, max_value=20, description="Desired replica count."),
+        },
+        "Scale a service to a new replica count.",
     ),
     "run_health_check": ActionSpec(
         "run_health_check",
