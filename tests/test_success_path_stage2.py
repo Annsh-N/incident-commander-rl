@@ -56,6 +56,13 @@ def test_success_path_stage2() -> None:
             "type": "apply_mitigation",
             "args": {"mitigation_id": "revert_pricing_url_config"},
         },
+        {
+            "type": "apply_config_patch",
+            "args": {
+                "service": "checkout-service",
+                "patch_id": "fix_pricing_url_v42",
+            },
+        },
         {"type": "wait", "args": {"steps": 1}},
         {
             "type": "confirm_metrics_normalized",

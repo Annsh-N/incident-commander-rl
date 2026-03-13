@@ -52,6 +52,10 @@ ACTION_SEQUENCE = [
         "type": "apply_mitigation",
         "args": {"mitigation_id": "disable_new_pricing_path"},
     },
+    {
+        "type": "toggle_feature_flag",
+        "args": {"flag": "new_pricing_path", "enabled": False},
+    },
     {"type": "wait", "args": {"steps": 1}},
     {
         "type": "confirm_metrics_normalized",

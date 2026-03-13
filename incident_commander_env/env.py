@@ -78,14 +78,21 @@ class EnvState:
     last_update_step: int | None = None
     updates_posted: list[dict[str, Any]] = field(default_factory=list)
     mitigations_applied: list[str] = field(default_factory=list)
+    proposed_mitigations: list[str] = field(default_factory=list)
+    executed_changes: list[dict[str, Any]] = field(default_factory=list)
     unsafe_attempt: bool = False
     config_state: dict[str, str] = field(default_factory=dict)
     deploy_versions: dict[str, str] = field(default_factory=dict)
     feature_flags: dict[str, bool] = field(default_factory=dict)
+    service_replicas: dict[str, int] = field(default_factory=dict)
+    service_restarts: dict[str, int] = field(default_factory=dict)
     service_health: dict[str, str] = field(default_factory=dict)
     resolved_state: bool = False
     causal_mitigation_id: str | None = None
     causal_fix_step: int | None = None
+    causal_change_planned: bool = False
+    causal_change_evidence_met: bool = False
+    last_executed_mitigation_id: str | None = None
     confirmations: dict[str, bool] = field(default_factory=dict)
     evidence_flags: dict[str, bool] = field(default_factory=dict)
     last_tool_results: dict[str, dict[str, Any] | None] = field(default_factory=dict)
@@ -128,6 +135,16 @@ class IncidentCommanderEnv:
             config_state=dict(scenario.config_versions),
             deploy_versions=dict(scenario.deploy_versions),
             feature_flags=dict(scenario.feature_flags),
+            service_replicas={
+                "checkout-service": 6,
+                "pricing-service": 4,
+                "orders-db": 1,
+            },
+            service_restarts={
+                "checkout-service": 0,
+                "pricing-service": 0,
+                "orders-db": 0,
+            },
             confirmations={"error_rate": False, "p95_latency": False},
             evidence_flags={
                 "saw_deploy": False,
@@ -217,6 +234,9 @@ class IncidentCommanderEnv:
             if self.state.current_step >= self.max_steps:
                 done = True
                 self.state.incident_status = "failed"
+                info["resolution"] = info["resolution"] or "timeout"
+                info.setdefault("failure_reasons", [])
+                info["failure_reasons"].append("timeout_exhausted")
                 info["debug"].append("Max steps reached before stable resolution.")
 
         reward = round(reward, 10)
@@ -294,8 +314,8 @@ class IncidentCommanderEnv:
             offset = step - self.state.causal_fix_step - 1
             return float(stabilized[min(offset, len(stabilized) - 1)])
 
-        if self.state.mitigations_applied:
-            latest = self.state.mitigations_applied[-1]
+        if self.state.last_executed_mitigation_id is not None:
+            latest = self.state.last_executed_mitigation_id
             if latest == "restart_checkout_service" and service == "checkout-service":
                 if metric == "cpu":
                     return max(45.0, degraded_value - 4.0)
@@ -330,7 +350,11 @@ class IncidentCommanderEnv:
         )
         metrics_confirmed = self.state.confirmations["error_rate"] and self.state.confirmations["p95_latency"]
         self.state.resolved_state = bool(
-            self.state.causal_mitigation_id and waited_after_fix and metrics_confirmed
+            self.state.causal_mitigation_id
+            and self.state.causal_change_planned
+            and self.state.causal_change_evidence_met
+            and waited_after_fix
+            and metrics_confirmed
         )
 
     def _apply_action(self, action: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
@@ -426,21 +450,60 @@ class IncidentCommanderEnv:
             tool_result = tool_request_help(args["team"], self.scenario)
         elif action_type == "apply_mitigation":
             mitigation_id = args["mitigation_id"]
-            self.state.mitigations_applied.append(mitigation_id)
-            self._record_mitigation_effect(mitigation_id)
+            self.state.proposed_mitigations.append(mitigation_id)
         elif action_type == "toggle_feature_flag":
             self.state.feature_flags[args["flag"]] = args["enabled"]
             if args["flag"] == "new_pricing_path" and args["enabled"] is False:
-                self._record_mitigation_effect("disable_new_pricing_path")
+                self._record_change_effect(
+                    mitigation_id="disable_new_pricing_path",
+                    change_type="toggle_feature_flag",
+                    details={"flag": args["flag"], "enabled": args["enabled"]},
+                )
         elif action_type == "apply_config_patch":
             patch_id = args["patch_id"]
             self.state.config_state[args["service"]] = f"{self.state.config_state[args['service']]}+{patch_id}"
             if args["service"] == "checkout-service" and patch_id == "fix_pricing_url_v42":
-                self._record_mitigation_effect("revert_pricing_url_config")
+                self._record_change_effect(
+                    mitigation_id="revert_pricing_url_config",
+                    change_type="apply_config_patch",
+                    details={"service": args["service"], "patch_id": patch_id},
+                )
         elif action_type == "rollback_deploy":
             self.state.deploy_versions[args["service"]] = args["to_version"]
             if args["service"] == "checkout-service" and args["to_version"] == "v41":
-                self._record_mitigation_effect("rollback_checkout_v42_to_v41")
+                self._record_change_effect(
+                    mitigation_id="rollback_checkout_v42_to_v41",
+                    change_type="rollback_deploy",
+                    details={
+                        "service": args["service"],
+                        "from_version": args["from_version"],
+                        "to_version": args["to_version"],
+                    },
+                )
+        elif action_type == "restart_service":
+            self.state.service_restarts[args["service"]] += 1
+            mitigation_id = self._map_service_change_to_mitigation(
+                action_type="restart_service",
+                service=args["service"],
+            )
+            if mitigation_id is not None:
+                self._record_change_effect(
+                    mitigation_id=mitigation_id,
+                    change_type="restart_service",
+                    details={"service": args["service"]},
+                )
+        elif action_type == "scale_service":
+            self.state.service_replicas[args["service"]] = args["replicas"]
+            mitigation_id = self._map_service_change_to_mitigation(
+                action_type="scale_service",
+                service=args["service"],
+            )
+            if mitigation_id is not None:
+                self._record_change_effect(
+                    mitigation_id=mitigation_id,
+                    change_type="scale_service",
+                    details={"service": args["service"], "replicas": args["replicas"]},
+                )
         elif action_type == "run_health_check":
             healthy = self.state.service_health[args["service"]] == "healthy"
             tool_result = {
@@ -479,12 +542,59 @@ class IncidentCommanderEnv:
 
         return tool_result, applied
 
-    def _record_mitigation_effect(self, mitigation_id: str) -> None:
+    def _map_service_change_to_mitigation(
+        self,
+        action_type: str,
+        service: str,
+    ) -> str | None:
+        if action_type == "restart_service":
+            if service == "checkout-service":
+                return "restart_checkout_service"
+            if service == "orders-db":
+                return "restart_database"
+            return None
+        if action_type == "scale_service":
+            if service == "checkout-service":
+                return "scale_checkout_service"
+            if service == "orders-db":
+                return "scale_database"
+            return None
+        return None
+
+    def _has_required_evidence(self) -> bool:
         assert self.state is not None
+        return any(
+            (
+                self.state.evidence_flags["saw_config_diff"],
+                self.state.evidence_flags["saw_key_log"],
+                self.state.evidence_flags["saw_deploy"],
+            )
+        )
+
+    def _record_change_effect(
+        self,
+        mitigation_id: str,
+        change_type: str,
+        details: dict[str, Any],
+    ) -> None:
+        assert self.state is not None
+        self.state.last_executed_mitigation_id = mitigation_id
+        self.state.executed_changes.append(
+            {
+                "step": self.state.current_step,
+                "change_type": change_type,
+                "mitigation_id": mitigation_id,
+                "planned": mitigation_id in self.state.proposed_mitigations,
+                "evidence_met": self._has_required_evidence(),
+                "details": deepcopy(details),
+            }
+        )
         if mitigation_id not in self.state.mitigations_applied:
             self.state.mitigations_applied.append(mitigation_id)
         if mitigation_id in self.scenario.allowed_mitigations:
             self.state.causal_mitigation_id = mitigation_id
             self.state.causal_fix_step = self.state.current_step
+            self.state.causal_change_planned = mitigation_id in self.state.proposed_mitigations
+            self.state.causal_change_evidence_met = self._has_required_evidence()
             self.state.confirmations = {"error_rate": False, "p95_latency": False}
             self.state.resolved_state = False
