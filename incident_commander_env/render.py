@@ -18,7 +18,9 @@ def render_observation(obs: dict) -> str:
         f"error_rate={metric_snapshot['error_rate']:.2f}, "
         f"p95_latency={metric_snapshot['p95_latency']:.2f}, "
         f"cpu={metric_snapshot['cpu']:.2f}, "
-        f"pricing_timeouts={metric_snapshot['pricing_timeouts']:.2f}"
+        f"pricing_timeouts={metric_snapshot['pricing_timeouts']:.2f}, "
+        f"db_conn={metric_snapshot['db_conn']:.2f}, "
+        f"queue_depth={metric_snapshot['queue_depth']:.2f}"
     )
 
     message_lines = [
@@ -35,17 +37,23 @@ def render_observation(obs: dict) -> str:
     if not action_lines:
         action_lines = ["- none"]
 
-    available_action_types = ", ".join(
-        action["type"] for action in obs["available_actions"]
+    evidence_flags = ", ".join(
+        f"{key}={value}" for key, value in sorted(obs["evidence_flags"].items())
     )
+    roles = ", ".join(f"{role}:{assignee}" for role, assignee in sorted(obs["incident"]["roles"].items()))
+    roles = roles or "none"
+    available_action_types = ", ".join(action["type"] for action in obs["available_actions"])
 
     sections = [
         f"Step: {obs['step']}",
         f"Status: {obs['status']}",
         f"Severity: {obs['severity']}",
+        f"Incident created: {obs['incident']['created']}",
+        f"Assigned roles: {roles}",
         "Alerts:",
         *alert_lines,
         f"Metrics: {metrics_line}",
+        f"Evidence: {evidence_flags}",
         "Recent messages:",
         *message_lines,
         "Recent actions:",
