@@ -1,4 +1,4 @@
-"""Action validation logic for Stage 2."""
+"""Action validation logic for Stage 3."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _is_float_like(value: Any) -> bool:
 
 
 def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str | None]:
-    """Validate an action against the strict Stage 2 schema."""
+    """Validate an action against the strict Stage 3 schema."""
 
     if not isinstance(action, dict):
         return False, "action must be a dict"
@@ -78,6 +78,7 @@ def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str |
     known_metrics = {
         service: set(metric_map.keys()) for service, metric_map in env_state.metrics.items()
     }
+    known_traces = {sample.trace_id: sample for sample in scenario.evidence.trace_samples}
 
     if action_type == "ack_alert":
         alert_ids = {alert.id for alert in env_state.active_alerts if alert.active}
@@ -110,15 +111,18 @@ def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str |
             return False, f"unknown service for logs: {args['service']}"
     elif action_type == "get_trace_sample":
         trace_id = args["trace_id"]
-        if trace_id not in scenario.evidence.trace_samples:
+        if trace_id not in known_traces:
             return False, f"unknown trace_id: {trace_id}"
-        if scenario.evidence.trace_samples[trace_id].service != args["service"]:
+        if known_traces[trace_id].service != args["service"]:
             return False, f"trace_id {trace_id} does not belong to {args['service']}"
     elif action_type == "diff_config":
-        service_diffs = scenario.evidence.config_diffs.get(args["service"], {})
-        version_pair = (args["from_version"], args["to_version"])
-        if version_pair not in service_diffs:
-            return False, f"unknown config diff for {args['service']} {version_pair}"
+        if not any(
+            record.service == args["service"]
+            and record.from_version == args["from_version"]
+            and record.to_version == args["to_version"]
+            for record in scenario.evidence.config_diffs
+        ):
+            return False, f"unknown config diff for {args['service']} {args['from_version']}->{args['to_version']}"
     elif action_type == "view_runbook":
         if args["service"] not in scenario.evidence.runbook_snippets:
             return False, f"no runbook for service: {args['service']}"

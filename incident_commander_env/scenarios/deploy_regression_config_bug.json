@@ -1,0 +1,173 @@
+{
+  "id": "deploy-regression-config-bug",
+  "title": "Checkout deploy regression from malformed pricing endpoint",
+  "description": "A new checkout deployment shipped a malformed pricing endpoint and a new pricing path flag. Customers see checkout 5xxs, pricing timeouts, and confusing downstream alerts.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "checkout_pricing_url_misconfigured_after_v42_deploy",
+  "services": [
+    {
+      "name": "checkout-service",
+      "description": "Customer-facing checkout API.",
+      "dependencies": ["pricing-service", "orders-db"],
+      "owner": "payments",
+      "initial_replicas": 6
+    },
+    {
+      "name": "pricing-service",
+      "description": "Quote and discount calculator.",
+      "dependencies": ["orders-db"],
+      "owner": "pricing",
+      "initial_replicas": 4
+    },
+    {
+      "name": "orders-db",
+      "description": "Primary orders database.",
+      "dependencies": [],
+      "owner": "db",
+      "initial_replicas": 1
+    }
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-checkout-error-rate", "service": "checkout-service", "signal": "error_rate > 5%"},
+        {"id": "alert-checkout-p95", "service": "checkout-service", "signal": "p95_latency > 1200ms"},
+        {"id": "alert-pricing-timeouts", "service": "pricing-service", "signal": "pricing_timeouts > baseline"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "deploy-bot", "text": "checkout-service v42 completed 4 minutes ago."}
+      ]
+    },
+    {
+      "step": 2,
+      "messages": [
+        {"ts_step": 2, "sender": "support", "text": "Customers cannot complete checkout."}
+      ]
+    },
+    {
+      "step": 6,
+      "messages": [
+        {"ts_step": 6, "sender": "manager", "text": "Need ETA for checkout recovery."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-service": {
+        "error_rate": {"degraded": [6.8, 7.6, 8.9, 9.2, 8.9, 8.5, 8.2, 7.9], "stabilized": [3.0, 1.9, 1.1, 0.8, 0.7]},
+        "p95_latency": {"degraded": [1320, 1490, 1610, 1660, 1620, 1570, 1520, 1490], "stabilized": [910, 640, 510, 470, 450]},
+        "cpu": {"degraded": [58, 61, 63, 64, 63, 62, 61, 60], "stabilized": [56, 53, 50, 48, 47]},
+        "queue_depth": {"degraded": [22, 31, 39, 44, 43, 40, 38, 37], "stabilized": [20, 14, 8, 6, 5]}
+      },
+      "pricing-service": {
+        "pricing_timeouts": {"degraded": [22, 30, 37, 42, 40, 38, 36, 34], "stabilized": [11, 5, 2, 1, 1]},
+        "cpu": {"degraded": [46, 47, 48, 49, 48, 47, 46, 46], "stabilized": [45, 44, 43, 42, 42]}
+      },
+      "orders-db": {
+        "db_conn": {"degraded": [64, 66, 68, 69, 68, 67, 66, 66], "stabilized": [63, 62, 61, 60, 60]},
+        "cpu": {"degraded": [38, 39, 39, 40, 40, 39, 39, 38], "stabilized": [37, 37, 36, 36, 35]}
+      }
+    },
+    "logs": {
+      "checkout-service": [
+        {"step": 0, "service": "checkout-service", "level": "INFO", "message": "Booting checkout-service version=v42"},
+        {"step": 0, "service": "checkout-service", "level": "INFO", "message": "Loaded 18 feature flags successfully"},
+        {"step": 1, "service": "checkout-service", "level": "WARN", "message": "pricing client timeout caller=checkout-service retry=1"},
+        {"step": 1, "service": "checkout-service", "level": "ERROR", "message": "ENV PRICING_URL invalid: http://pricing:8080v1"},
+        {"step": 1, "service": "checkout-service", "level": "ERROR", "message": "checkout request failed cause=pricing timeout trace_id=trace-checkout-001"},
+        {"step": 2, "service": "checkout-service", "level": "INFO", "message": "guest cart cleanup completed"},
+        {"step": 2, "service": "checkout-service", "level": "WARN", "message": "queue lag within soft threshold"}
+      ],
+      "pricing-service": [
+        {"step": 0, "service": "pricing-service", "level": "INFO", "message": "pricing-service ready"},
+        {"step": 1, "service": "pricing-service", "level": "WARN", "message": "client timeouts increased caller=checkout-service"},
+        {"step": 2, "service": "pricing-service", "level": "INFO", "message": "cpu stable at 46%"}
+      ],
+      "orders-db": [
+        {"step": 0, "service": "orders-db", "level": "INFO", "message": "connection pool healthy active=64"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "checkout-service", "step": 0, "from_version": "v41", "to_version": "v42", "author": "deploy-bot"},
+      {"service": "pricing-service", "step": -3, "from_version": "v16", "to_version": "v17", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "checkout-service",
+        "from_version": "v41",
+        "to_version": "v42",
+        "diff": [
+          {"key": "PRICING_URL", "from": "http://pricing:8080/v1", "to": "http://pricing:8080v1"},
+          {"key": "NEW_PRICING_PATH", "from": "false", "to": "true"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-service",
+        "trace_id": "trace-checkout-001",
+        "spans": [
+          {"service": "checkout-service", "operation": "POST /checkout", "duration_ms": 1610, "status": "error"},
+          {"service": "pricing-service", "operation": "GET /price", "duration_ms": 1490, "status": "timeout"},
+          {"service": "orders-db", "operation": "SELECT cart", "duration_ms": 13, "status": "ok"}
+        ],
+        "error": "pricing timeout propagated to checkout",
+        "duration_ms": 1610
+      }
+    ],
+    "runbook_snippets": {
+      "checkout-service": {
+        "triage": ["Check recent deploys before scaling.", "Diff PRICING_URL and feature flags for checkout."],
+        "mitigation": ["Rollback checkout or patch PRICING_URL.", "Disabling the new pricing path is a safe fallback."],
+        "verification": ["Confirm checkout error_rate and p95 recover.", "Confirm pricing timeout volume drops."]
+      },
+      "pricing-service": {
+        "triage": ["If pricing CPU is stable, inspect caller config first."],
+        "mitigation": ["Avoid scaling pricing before validating caller config."],
+        "verification": ["Timeout volume should drop after caller remediation."]
+      }
+    },
+    "help_responses": {
+      "db": "DB team sees no saturation.",
+      "network": "Network path looks healthy.",
+      "pricing": "Pricing team suggests checking checkout config.",
+      "platform": "Platform suggests diffing checkout env vars against v41."
+    }
+  },
+  "patch_ids": {"checkout-service": ["fix_pricing_url_v42"]},
+  "feature_flags": {"new_pricing_path": true},
+  "deploy_versions": {"checkout-service": "v42", "pricing-service": "v17", "orders-db": "db-2026-03-08"},
+  "config_versions": {"checkout-service": "v42", "pricing-service": "v17", "orders-db": "db-2026-03-08"},
+  "allowed_mitigations": ["rollback_checkout_v42_to_v41", "revert_pricing_url_config", "disable_new_pricing_path"],
+  "safe_mitigations": ["rollback_checkout_v42_to_v41", "revert_pricing_url_config", "disable_new_pricing_path", "scale_checkout_service", "restart_checkout_service"],
+  "forbidden_mitigations": ["restart_database", "scale_database", "purge_queue"],
+  "all_mitigations": ["rollback_checkout_v42_to_v41", "revert_pricing_url_config", "disable_new_pricing_path", "scale_checkout_service", "restart_checkout_service", "restart_database", "scale_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "rollback_checkout_v42_to_v41", "action_type": "rollback_deploy", "args_match": {"service": "checkout-service", "from_version": "v42", "to_version": "v41"}, "causal": true},
+    {"mitigation_id": "revert_pricing_url_config", "action_type": "apply_config_patch", "args_match": {"service": "checkout-service", "patch_id": "fix_pricing_url_v42"}, "causal": true},
+    {"mitigation_id": "disable_new_pricing_path", "action_type": "toggle_feature_flag", "args_match": {"flag": "new_pricing_path", "enabled": false}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-service"}, "causal": false},
+    {"mitigation_id": "scale_checkout_service", "action_type": "scale_service", "args_match": {"service": "checkout-service", "replicas": 10}, "causal": false},
+    {"mitigation_id": "restart_database", "action_type": "restart_service", "args_match": {"service": "orders-db"}, "causal": false, "forbidden": true},
+    {"mitigation_id": "scale_database", "action_type": "scale_service", "args_match": {"service": "orders-db", "replicas": 2}, "causal": false, "forbidden": true}
+  ],
+  "causal_action_sets": [["rollback_checkout_v42_to_v41"], ["revert_pricing_url_config"], ["disable_new_pricing_path"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_config_diff"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "checkout-service", "metric": "error_rate", "target": 2.5, "window_steps": 1},
+      {"service": "checkout-service", "metric": "p95_latency", "target": 700.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["PRICING_URL invalid"],
+    "deploy_service": "checkout-service",
+    "deploy_to_version": "v42",
+    "config_keys": ["PRICING_URL"],
+    "trace_error_terms": ["timeout"]
+  }
+}

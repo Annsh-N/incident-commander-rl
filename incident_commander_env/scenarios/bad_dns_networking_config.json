@@ -1,0 +1,117 @@
+{
+  "id": "bad-dns-networking-config",
+  "title": "Bad DNS resolver configuration causing widespread timeouts",
+  "description": "A recent config change broke name resolution for a dependency. Requests time out, traces stall early, and the fix is to revert the resolver config or roll back the bad release.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "dns_resolver_config_broken_for_tax_service",
+  "services": [
+    {"name": "checkout-api", "description": "Checkout API.", "dependencies": ["tax-service"], "owner": "payments", "initial_replicas": 6},
+    {"name": "tax-service", "description": "Tax calculation dependency.", "dependencies": [], "owner": "finops", "initial_replicas": 4},
+    {"name": "dns-cache", "description": "Resolver sidecar.", "dependencies": [], "owner": "platform", "initial_replicas": 2}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-checkout-timeouts", "service": "checkout-api", "signal": "p95_latency > 1400ms"},
+        {"id": "alert-tax-timeouts", "service": "tax-service", "signal": "dependency_timeouts > baseline"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "platform-bot", "text": "Resolver config rollout completed on checkout-api."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-api": {
+        "error_rate": {"degraded": [4.9, 5.6, 6.1, 6.2, 6.0, 5.9, 5.8], "stabilized": [3.0, 1.9, 1.2, 0.8, 0.8]},
+        "p95_latency": {"degraded": [1380, 1560, 1690, 1710, 1660, 1620, 1590], "stabilized": [980, 690, 540, 500, 490]},
+        "cpu": {"degraded": [51, 52, 53, 53, 52, 52, 51], "stabilized": [50, 49, 48, 47, 47]}
+      },
+      "tax-service": {
+        "pricing_timeouts": {"degraded": [19, 25, 31, 35, 33, 31, 29], "stabilized": [11, 5, 2, 1, 1]},
+        "cpu": {"degraded": [41, 42, 42, 43, 43, 42, 42], "stabilized": [41, 41, 41, 41, 41]}
+      }
+    },
+    "logs": {
+      "checkout-api": [
+        {"step": 0, "service": "checkout-api", "level": "WARN", "message": "lookup tax-service.internal failed temporary failure in name resolution"},
+        {"step": 1, "service": "checkout-api", "level": "ERROR", "message": "resolver could not resolve tax-service.internal using new nameserver list"},
+        {"step": 2, "service": "checkout-api", "level": "WARN", "message": "retry budget increased because dns lookups are failing"}
+      ],
+      "tax-service": [
+        {"step": 1, "service": "tax-service", "level": "INFO", "message": "tax-service healthy and serving requests"},
+        {"step": 2, "service": "tax-service", "level": "INFO", "message": "no server-side saturation observed"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "checkout-api", "step": 0, "from_version": "v61", "to_version": "v62", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "checkout-api",
+        "from_version": "v61",
+        "to_version": "v62",
+        "diff": [
+          {"key": "DNS_RESOLVER_LIST", "from": "10.0.0.2,10.0.0.3", "to": "10.0.9.9,10.0.9.10"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-api",
+        "trace_id": "trace-dns-001",
+        "spans": [
+          {"service": "checkout-api", "operation": "POST /checkout", "duration_ms": 1710, "status": "error"},
+          {"service": "dns-cache", "operation": "resolve tax-service.internal", "duration_ms": 810, "status": "error"}
+        ],
+        "error": "name resolution failure contacting tax-service",
+        "duration_ms": 1710
+      }
+    ],
+    "runbook_snippets": {
+      "checkout-api": {
+        "triage": ["Look for name resolution failures before assuming the dependency is down."],
+        "mitigation": ["Revert DNS resolver config or roll back the release that changed it."],
+        "verification": ["Timeouts and checkout latency should drop after resolver recovery."]
+      }
+    },
+    "help_responses": {
+      "db": "Database is not involved.",
+      "network": "Network path is fine; the resolver config looks suspicious.",
+      "pricing": "Pricing is unrelated.",
+      "platform": "Platform suggests reverting the DNS resolver list change."
+    }
+  },
+  "patch_ids": {"checkout-api": ["revert_dns_resolver_list"]},
+  "feature_flags": {"tax_fallback_enabled": false},
+  "deploy_versions": {"checkout-api": "v62", "tax-service": "v14", "dns-cache": "v6"},
+  "config_versions": {"checkout-api": "v62", "tax-service": "v14", "dns-cache": "v6"},
+  "allowed_mitigations": ["revert_dns_resolver_list", "rollback_checkout_v62_to_v61"],
+  "safe_mitigations": ["revert_dns_resolver_list", "rollback_checkout_v62_to_v61", "restart_checkout_service"],
+  "forbidden_mitigations": ["restart_database", "purge_queue"],
+  "all_mitigations": ["revert_dns_resolver_list", "rollback_checkout_v62_to_v61", "restart_checkout_service", "restart_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "revert_dns_resolver_list", "action_type": "apply_config_patch", "args_match": {"service": "checkout-api", "patch_id": "revert_dns_resolver_list"}, "causal": true},
+    {"mitigation_id": "rollback_checkout_v62_to_v61", "action_type": "rollback_deploy", "args_match": {"service": "checkout-api", "from_version": "v62", "to_version": "v61"}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-api"}, "causal": false}
+  ],
+  "causal_action_sets": [["revert_dns_resolver_list"], ["rollback_checkout_v62_to_v61"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_timeout_trace"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "checkout-api", "metric": "error_rate", "target": 2.5, "window_steps": 1},
+      {"service": "checkout-api", "metric": "p95_latency", "target": 700.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["name resolution", "resolver could not resolve"],
+    "deploy_service": "checkout-api",
+    "deploy_to_version": "v62",
+    "config_keys": ["DNS_RESOLVER_LIST"],
+    "trace_error_terms": ["name resolution failure"]
+  }
+}

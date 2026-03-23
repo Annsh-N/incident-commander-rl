@@ -1,0 +1,129 @@
+{
+  "id": "queue-backlog-downstream-timeouts",
+  "title": "Worker queue backlog causing downstream timeouts",
+  "description": "Order processing workers fall behind, queue depth grows, and downstream calls exceed timeout budgets. Purging the queue is unsafe and masks the real problem.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "worker_concurrency_too_low_for_order_queue",
+  "services": [
+    {"name": "checkout-api", "description": "Checkout ingress API.", "dependencies": ["fulfillment-worker"], "owner": "payments", "initial_replicas": 5},
+    {"name": "fulfillment-worker", "description": "Worker fleet consuming order events.", "dependencies": ["inventory-service"], "owner": "operations", "initial_replicas": 3},
+    {"name": "inventory-service", "description": "Inventory reservation dependency.", "dependencies": [], "owner": "inventory", "initial_replicas": 4}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-queue-depth", "service": "fulfillment-worker", "signal": "queue_depth > 200"},
+        {"id": "alert-checkout-latency", "service": "checkout-api", "signal": "p95_latency > 1200ms"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "queue-monitor", "text": "Order queue depth crossed 220 messages."}
+      ]
+    },
+    {
+      "step": 2,
+      "messages": [
+        {"ts_step": 2, "sender": "support", "text": "Order confirmations are delayed by several minutes."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-api": {
+        "p95_latency": {"degraded": [1180, 1320, 1490, 1580, 1540, 1490, 1460], "stabilized": [890, 640, 520, 470, 450]},
+        "error_rate": {"degraded": [2.9, 3.7, 4.3, 4.6, 4.4, 4.2, 4.1], "stabilized": [2.1, 1.4, 0.9, 0.7, 0.6]},
+        "cpu": {"degraded": [52, 54, 56, 57, 56, 55, 55], "stabilized": [50, 49, 47, 46, 46]}
+      },
+      "fulfillment-worker": {
+        "queue_depth": {"degraded": [220, 265, 320, 360, 340, 315, 290], "stabilized": [180, 90, 40, 18, 12]},
+        "pricing_timeouts": {"degraded": [14, 20, 26, 29, 28, 26, 24], "stabilized": [10, 6, 3, 1, 1]},
+        "cpu": {"degraded": [58, 61, 63, 65, 64, 63, 62], "stabilized": [57, 53, 49, 47, 46]}
+      },
+      "inventory-service": {
+        "cpu": {"degraded": [44, 44, 45, 45, 45, 44, 44], "stabilized": [44, 43, 43, 43, 43]},
+        "error_rate": {"degraded": [0.6, 0.7, 0.7, 0.7, 0.7, 0.6, 0.6], "stabilized": [0.6, 0.6, 0.6, 0.6, 0.6]}
+      }
+    },
+    "logs": {
+      "fulfillment-worker": [
+        {"step": 0, "service": "fulfillment-worker", "level": "WARN", "message": "consumer lag exceeded threshold lag=220"},
+        {"step": 1, "service": "fulfillment-worker", "level": "WARN", "message": "worker concurrency capped at 3 active consumers"},
+        {"step": 1, "service": "fulfillment-worker", "level": "ERROR", "message": "inventory call timed out after waiting in queue"},
+        {"step": 2, "service": "fulfillment-worker", "level": "WARN", "message": "queue depth rising faster than drain rate"}
+      ],
+      "checkout-api": [
+        {"step": 1, "service": "checkout-api", "level": "WARN", "message": "order completion polling exceeded p95 budget"},
+        {"step": 2, "service": "checkout-api", "level": "INFO", "message": "payment authorization success unchanged"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "fulfillment-worker", "step": -1, "from_version": "v14", "to_version": "v15", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "fulfillment-worker",
+        "from_version": "v14",
+        "to_version": "v15",
+        "diff": [
+          {"key": "ORDER_CONSUMER_CONCURRENCY", "from": "6", "to": "3"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-api",
+        "trace_id": "trace-queue-001",
+        "spans": [
+          {"service": "checkout-api", "operation": "POST /checkout", "duration_ms": 1540, "status": "ok"},
+          {"service": "fulfillment-worker", "operation": "process order", "duration_ms": 1380, "status": "timeout"}
+        ],
+        "error": "worker queue wait exceeded downstream timeout budget",
+        "duration_ms": 1540
+      }
+    ],
+    "runbook_snippets": {
+      "fulfillment-worker": {
+        "triage": ["Inspect queue depth and current consumer concurrency before blaming the downstream service."],
+        "mitigation": ["Increase worker concurrency or scale workers.", "Do not purge the queue unless data loss is acceptable."],
+        "verification": ["Queue depth should normalize and checkout latency should recover."]
+      }
+    },
+    "help_responses": {
+      "db": "Database is not involved in the current backlog.",
+      "network": "No network drop between workers and inventory.",
+      "pricing": "Pricing is not on the worker path.",
+      "platform": "Platform suggests checking worker concurrency after the recent deploy."
+    }
+  },
+  "patch_ids": {"fulfillment-worker": ["increase_consumer_concurrency"]},
+  "feature_flags": {"worker_fast_path": true},
+  "deploy_versions": {"checkout-api": "v40", "fulfillment-worker": "v15", "inventory-service": "v21"},
+  "config_versions": {"checkout-api": "v40", "fulfillment-worker": "v15", "inventory-service": "v21"},
+  "allowed_mitigations": ["increase_consumer_concurrency", "scale_worker_consumers"],
+  "safe_mitigations": ["increase_consumer_concurrency", "scale_worker_consumers", "restart_checkout_service"],
+  "forbidden_mitigations": ["purge_queue", "restart_database"],
+  "all_mitigations": ["increase_consumer_concurrency", "scale_worker_consumers", "restart_checkout_service", "purge_queue", "restart_database"],
+  "mitigation_rules": [
+    {"mitigation_id": "increase_consumer_concurrency", "action_type": "apply_config_patch", "args_match": {"service": "fulfillment-worker", "patch_id": "increase_consumer_concurrency"}, "causal": true},
+    {"mitigation_id": "scale_worker_consumers", "action_type": "scale_service", "args_match": {"service": "fulfillment-worker", "replicas": 8}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-api"}, "causal": false}
+  ],
+  "causal_action_sets": [["increase_consumer_concurrency"], ["scale_worker_consumers"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_config_diff"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "fulfillment-worker", "metric": "queue_depth", "target": 20.0, "window_steps": 1},
+      {"service": "checkout-api", "metric": "p95_latency", "target": 700.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["consumer lag", "queue depth rising"],
+    "deploy_service": "fulfillment-worker",
+    "deploy_to_version": "v15",
+    "config_keys": ["ORDER_CONSUMER_CONCURRENCY"],
+    "trace_error_terms": ["queue wait exceeded"]
+  }
+}

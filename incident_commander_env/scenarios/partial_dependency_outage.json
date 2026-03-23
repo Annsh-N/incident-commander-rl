@@ -1,0 +1,125 @@
+{
+  "id": "partial-dependency-outage",
+  "title": "Intermittent dependency outage requiring graceful degradation",
+  "description": "A flaky downstream service returns intermittent 503s. The front door should switch to a fallback path instead of scaling the healthy dependency blindly.",
+  "severity": "sev2",
+  "ground_truth_root_cause_id": "catalog_dependency_partial_outage_needs_fallback",
+  "services": [
+    {"name": "api-gateway", "description": "External traffic entrypoint.", "dependencies": ["catalog-service"], "owner": "edge", "initial_replicas": 5},
+    {"name": "catalog-service", "description": "Product catalog and recommendation dependency.", "dependencies": [], "owner": "catalog", "initial_replicas": 4},
+    {"name": "profile-service", "description": "User profile enrichment service.", "dependencies": [], "owner": "identity", "initial_replicas": 3}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-api-errors", "service": "api-gateway", "signal": "error_rate > 3%"},
+        {"id": "alert-catalog-503", "service": "catalog-service", "signal": "dependency_503_rate > 20"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "status-bot", "text": "Catalog dependency 503 rate is rising."}
+      ]
+    },
+    {
+      "step": 3,
+      "messages": [
+        {"ts_step": 3, "sender": "support", "text": "Some product pages and checkout upsells are failing."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "api-gateway": {
+        "error_rate": {"degraded": [3.4, 4.1, 4.7, 4.9, 4.8, 4.6, 4.4], "stabilized": [2.5, 1.7, 1.1, 0.8, 0.8]},
+        "p95_latency": {"degraded": [980, 1120, 1250, 1320, 1290, 1250, 1220], "stabilized": [840, 610, 520, 500, 490]},
+        "cpu": {"degraded": [49, 50, 51, 52, 52, 51, 50], "stabilized": [48, 47, 46, 46, 46]}
+      },
+      "catalog-service": {
+        "dependency_503_rate": {"degraded": [22, 29, 36, 41, 39, 36, 34], "stabilized": [12, 6, 3, 1, 1]},
+        "cpu": {"degraded": [43, 44, 45, 45, 45, 44, 44], "stabilized": [43, 42, 42, 42, 42]}
+      },
+      "profile-service": {
+        "error_rate": {"degraded": [0.4, 0.4, 0.4, 0.5, 0.4, 0.4, 0.4], "stabilized": [0.4, 0.4, 0.4, 0.4, 0.4]}
+      }
+    },
+    "logs": {
+      "api-gateway": [
+        {"step": 0, "service": "api-gateway", "level": "WARN", "message": "catalog call returned 503 retrying once"},
+        {"step": 1, "service": "api-gateway", "level": "ERROR", "message": "dependency 503 from catalog-service no fallback enabled"},
+        {"step": 2, "service": "api-gateway", "level": "WARN", "message": "profile-service latency stable at 110ms"}
+      ],
+      "catalog-service": [
+        {"step": 0, "service": "catalog-service", "level": "WARN", "message": "upstream cache miss storm but cpu remains normal"},
+        {"step": 1, "service": "catalog-service", "level": "ERROR", "message": "returning 503 due to regional backend issue"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "profile-service", "step": -1, "from_version": "v18", "to_version": "v19", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "api-gateway",
+        "from_version": "v27",
+        "to_version": "v28",
+        "diff": [
+          {"key": "CATALOG_FALLBACK_ENABLED", "from": "false", "to": "false"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "api-gateway",
+        "trace_id": "trace-catalog-001",
+        "spans": [
+          {"service": "api-gateway", "operation": "GET /product", "duration_ms": 1280, "status": "error"},
+          {"service": "catalog-service", "operation": "GET /catalog", "duration_ms": 980, "status": "503"}
+        ],
+        "error": "catalog dependency returned 503",
+        "duration_ms": 1280
+      }
+    ],
+    "runbook_snippets": {
+      "api-gateway": {
+        "triage": ["If a dependency returns 503 intermittently, verify fallback behavior before scaling."],
+        "mitigation": ["Enable catalog fallback mode to degrade gracefully."],
+        "verification": ["API error rate should drop and dependency 503 impact should shrink."]
+      }
+    },
+    "help_responses": {
+      "db": "Database is not implicated.",
+      "network": "Network is healthy but the dependency returns 503.",
+      "pricing": "Pricing is unrelated to the failing calls.",
+      "platform": "Platform suggests enabling the fallback mode configured for this path."
+    }
+  },
+  "patch_ids": {"api-gateway": []},
+  "feature_flags": {"catalog_fallback_enabled": false},
+  "deploy_versions": {"api-gateway": "v28", "catalog-service": "v12", "profile-service": "v19"},
+  "config_versions": {"api-gateway": "v28", "catalog-service": "v12", "profile-service": "v19"},
+  "allowed_mitigations": ["enable_catalog_fallback"],
+  "safe_mitigations": ["enable_catalog_fallback", "scale_catalog_service"],
+  "forbidden_mitigations": ["restart_database", "purge_queue"],
+  "all_mitigations": ["enable_catalog_fallback", "scale_catalog_service", "restart_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "enable_catalog_fallback", "action_type": "toggle_feature_flag", "args_match": {"flag": "catalog_fallback_enabled", "enabled": true}, "causal": true},
+    {"mitigation_id": "scale_catalog_service", "action_type": "scale_service", "args_match": {"service": "catalog-service", "replicas": 6}, "causal": false}
+  ],
+  "causal_action_sets": [["enable_catalog_fallback"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_timeout_trace"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "api-gateway", "metric": "error_rate", "target": 2.5, "window_steps": 1},
+      {"service": "catalog-service", "metric": "dependency_503_rate", "target": 5.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 4
+  },
+  "evidence_markers": {
+    "key_log_terms": ["dependency 503", "fallback enabled"],
+    "deploy_service": "profile-service",
+    "deploy_to_version": "v19",
+    "config_keys": ["CATALOG_FALLBACK_ENABLED"],
+    "trace_error_terms": ["returned 503"]
+  }
+}

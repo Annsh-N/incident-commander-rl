@@ -1,0 +1,132 @@
+{
+  "id": "database-connection-exhaustion",
+  "title": "Application pool exhaustion driving database connection failures",
+  "description": "Checkout traffic spikes into a connection-pool regression. App nodes exhaust database connections and throw 5xxs. Restarting the database is unsafe and does not solve the root cause.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "checkout_pool_limit_too_low_under_burst_traffic",
+  "services": [
+    {"name": "checkout-service", "description": "Checkout API.", "dependencies": ["orders-db", "auth-service"], "owner": "payments", "initial_replicas": 6},
+    {"name": "orders-db", "description": "Primary orders database.", "dependencies": [], "owner": "db", "initial_replicas": 1},
+    {"name": "auth-service", "description": "Session and token service.", "dependencies": [], "owner": "identity", "initial_replicas": 3}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-db-conn", "service": "orders-db", "signal": "db_conn > 90"},
+        {"id": "alert-checkout-5xx", "service": "checkout-service", "signal": "error_rate > 5%"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "traffic-bot", "text": "Promo campaign traffic is above forecast."}
+      ]
+    },
+    {
+      "step": 2,
+      "messages": [
+        {"ts_step": 2, "sender": "support", "text": "Checkout returns intermittent 500s."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-service": {
+        "error_rate": {"degraded": [5.9, 6.8, 7.2, 7.0, 6.8, 6.6, 6.5], "stabilized": [3.2, 2.0, 1.3, 0.9, 0.8]},
+        "p95_latency": {"degraded": [1280, 1420, 1510, 1490, 1460, 1440, 1420], "stabilized": [910, 690, 560, 510, 500]},
+        "cpu": {"degraded": [62, 64, 66, 66, 65, 64, 63], "stabilized": [60, 57, 54, 52, 51]}
+      },
+      "orders-db": {
+        "db_conn": {"degraded": [91, 95, 97, 96, 95, 94, 93], "stabilized": [85, 77, 71, 68, 66]},
+        "cpu": {"degraded": [48, 49, 50, 50, 49, 49, 48], "stabilized": [47, 45, 44, 43, 43]}
+      },
+      "auth-service": {
+        "error_rate": {"degraded": [0.4, 0.5, 0.5, 0.5, 0.4, 0.4, 0.4], "stabilized": [0.4, 0.4, 0.4, 0.4, 0.4]},
+        "p95_latency": {"degraded": [220, 230, 235, 230, 225, 220, 220], "stabilized": [220, 220, 220, 220, 220]}
+      }
+    },
+    "logs": {
+      "checkout-service": [
+        {"step": 0, "service": "checkout-service", "level": "WARN", "message": "checkout pool borrowing slowed waiting for db connections"},
+        {"step": 1, "service": "checkout-service", "level": "ERROR", "message": "too many connections while opening order transaction"},
+        {"step": 1, "service": "checkout-service", "level": "WARN", "message": "auth-service latency increased to 230ms"},
+        {"step": 2, "service": "checkout-service", "level": "ERROR", "message": "db pool exhausted max_active=30 wait_ms=800"}
+      ],
+      "orders-db": [
+        {"step": 0, "service": "orders-db", "level": "INFO", "message": "database cpu stable at 49%"},
+        {"step": 1, "service": "orders-db", "level": "WARN", "message": "connection count peaked at 97 active clients"},
+        {"step": 2, "service": "orders-db", "level": "INFO", "message": "slow query rate unchanged"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "checkout-service", "step": -1, "from_version": "v32", "to_version": "v33", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "checkout-service",
+        "from_version": "v32",
+        "to_version": "v33",
+        "diff": [
+          {"key": "DB_POOL_MAX", "from": "60", "to": "30"},
+          {"key": "REQUEST_TIMEOUT_MS", "from": "1800", "to": "1500"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-service",
+        "trace_id": "trace-db-001",
+        "spans": [
+          {"service": "checkout-service", "operation": "POST /checkout", "duration_ms": 1480, "status": "error"},
+          {"service": "orders-db", "operation": "INSERT order", "duration_ms": 820, "status": "error"}
+        ],
+        "error": "database connection acquisition timeout",
+        "duration_ms": 1480
+      }
+    ],
+    "runbook_snippets": {
+      "checkout-service": {
+        "triage": ["Check DB_POOL_MAX and pool exhaustion logs before restarting the database."],
+        "mitigation": ["Increase pool limit and scale the app tier together if the DB itself is not saturated."],
+        "verification": ["Confirm db_conn falls below saturation and checkout error_rate recovers."]
+      }
+    },
+    "help_responses": {
+      "db": "DB team says the instance is stable but client connections are saturated.",
+      "network": "No packet loss between checkout and the database.",
+      "pricing": "Pricing is not in the checkout path for these failures.",
+      "platform": "Platform suggests diffing DB pool settings and scaling the app tier."
+    }
+  },
+  "patch_ids": {"checkout-service": ["raise_db_pool_limit"]},
+  "feature_flags": {"checkout_fast_commit": true},
+  "deploy_versions": {"checkout-service": "v33", "orders-db": "db-2026-03-12", "auth-service": "v18"},
+  "config_versions": {"checkout-service": "v33", "orders-db": "db-2026-03-12", "auth-service": "v18"},
+  "allowed_mitigations": ["increase_db_pool_limit_and_scale_checkout"],
+  "safe_mitigations": ["increase_db_pool_limit_and_scale_checkout", "scale_checkout_service", "restart_checkout_service"],
+  "forbidden_mitigations": ["restart_database", "purge_queue"],
+  "all_mitigations": ["increase_db_pool_limit_and_scale_checkout", "scale_checkout_service", "restart_checkout_service", "restart_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "increase_db_pool_limit_and_scale_checkout", "action_type": "apply_config_patch", "args_match": {"service": "checkout-service", "patch_id": "raise_db_pool_limit"}, "causal": true},
+    {"mitigation_id": "increase_db_pool_limit_and_scale_checkout", "action_type": "scale_service", "args_match": {"service": "checkout-service", "replicas": 12}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-service"}, "causal": false},
+    {"mitigation_id": "scale_checkout_service", "action_type": "scale_service", "args_match": {"service": "checkout-service", "replicas": 10}, "causal": false},
+    {"mitigation_id": "restart_database", "action_type": "restart_service", "args_match": {"service": "orders-db"}, "causal": false, "forbidden": true}
+  ],
+  "causal_action_sets": [["increase_db_pool_limit_and_scale_checkout", "increase_db_pool_limit_and_scale_checkout"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_config_diff"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "checkout-service", "metric": "error_rate", "target": 2.5, "window_steps": 1},
+      {"service": "orders-db", "metric": "db_conn", "target": 80.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["too many connections", "db pool exhausted"],
+    "deploy_service": "checkout-service",
+    "deploy_to_version": "v33",
+    "config_keys": ["DB_POOL_MAX"],
+    "trace_error_terms": ["connection acquisition timeout"]
+  }
+}
