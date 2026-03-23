@@ -17,3 +17,4 @@ def test_suite_determinism(tmp_path) -> None:
     )
 
     assert first == second
+    assert 0.3 < first["overall_pass_rate"] < 0.9

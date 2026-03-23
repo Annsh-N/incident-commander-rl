@@ -1,8 +1,9 @@
-"""Scenario loading and serialization for Stage 3."""
+"""Scenario loading, aliases, and public hints for Stage 3."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -199,10 +200,131 @@ class Scenario:
 
 
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
+SCENARIO_ALIASES = {
+    "svc-checkout-regression": "deploy-regression-config-bug",
+}
+
+SCENARIO_CATEGORY_MAP = {
+    "deploy-regression-config-bug": "deploy",
+    "database-connection-exhaustion": "db",
+    "queue-backlog-downstream-timeouts": "queue",
+    "partial-dependency-outage": "dependency",
+    "memory-leak-after-deploy": "memory",
+    "bad-dns-networking-config": "dns",
+    "retry-storm-thundering-herd": "retry",
+    "security-permission-denied": "security",
+}
+
+ROOT_CAUSE_DISTRACTORS = {
+    "deploy": [
+        "checkout_cpu_limit_too_low_after_recent_deploy",
+        "checkout_payment_validation_bug_after_recent_deploy",
+    ],
+    "db": [
+        "orders_db_cpu_saturation_under_burst_traffic",
+        "checkout_read_query_regression_exhausted_database",
+    ],
+    "queue": [
+        "order_events_retention_policy_dropped_messages",
+        "pricing_timeouts_cascaded_into_worker_backlog",
+    ],
+    "dependency": [
+        "catalog_cache_warmup_failure_degraded_reads",
+        "api_gateway_rate_limit_blocked_catalog_requests",
+    ],
+    "memory": [
+        "checkout_cache_fragmentation_exhausted_container_memory",
+        "checkout_background_reaper_stalled_after_recent_release",
+    ],
+    "dns": [
+        "tax_service_tls_policy_rejected_connections",
+        "checkout_outbound_proxy_blocked_service_resolution",
+    ],
+    "retry": [
+        "api_gateway_cache_bypass_tripled_origin_traffic",
+        "downstream_pool_starvation_caused_gateway_queueing",
+    ],
+    "security": [
+        "checkout_secret_rotation_left_old_credentials_active",
+        "iam_audience_mismatch_rejected_service_tokens",
+    ],
+}
 
 
 def _tuple_of_strings(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     return tuple(values)
+
+
+def canonical_scenario_id(scenario_id: str) -> str:
+    """Resolve a scenario id alias to its canonical id."""
+
+    return SCENARIO_ALIASES.get(scenario_id, scenario_id)
+
+
+def scenario_category(scenario: Scenario) -> str:
+    """Return a public incident category for a scenario or variant."""
+
+    key = scenario.variant_of or scenario.id
+    return SCENARIO_CATEGORY_MAP.get(key, "generic")
+
+
+def scenario_primary_service(scenario: Scenario) -> str:
+    """Return the public primary service for triage guidance."""
+
+    if scenario.resolution_rubric.required_verification:
+        return scenario.resolution_rubric.required_verification[0].service
+    deploy_service = scenario.evidence_markers.get("deploy_service")
+    if isinstance(deploy_service, str) and deploy_service in scenario.evidence.services:
+        return deploy_service
+    return sorted(scenario.evidence.services.keys())[0]
+
+
+def scenario_log_service_hint(scenario: Scenario) -> str:
+    """Return the most likely service to inspect logs on first."""
+
+    key_terms = scenario.evidence_markers.get("key_log_terms", [])
+    for service, entries in scenario.evidence.logs_by_service.items():
+        if any(
+            any(term.casefold() in entry.message.casefold() for term in key_terms)
+            for entry in entries
+        ):
+            return service
+    return scenario_primary_service(scenario)
+
+
+def scenario_root_cause_candidates(scenario: Scenario) -> list[str]:
+    """Return deterministic plausible root-cause hypotheses including the truth."""
+
+    category = scenario_category(scenario)
+    candidates = [scenario.ground_truth_root_cause_id, *ROOT_CAUSE_DISTRACTORS.get(category, [])]
+    ordered = sorted(
+        set(candidates),
+        key=lambda item: (
+            int(
+                hashlib.sha256(f"{scenario.id}:{item}".encode("utf-8")).hexdigest()[:8],
+                16,
+            ),
+            item,
+        ),
+    )
+    return ordered
+
+
+def scenario_query_hints(scenario: Scenario) -> list[str]:
+    """Return public query hints derived from alert routing/category metadata."""
+
+    category = scenario_category(scenario)
+    hints = {
+        "deploy": ["PRICING_URL", "timeout", "deploy"],
+        "db": ["too many connections", "connections", "pool"],
+        "queue": ["consumer", "queue", "timeout"],
+        "dependency": ["503", "timeout", "fallback"],
+        "memory": ["OOM", "memory", "killed"],
+        "dns": ["resolve", "DNS", "timeout"],
+        "retry": ["retry", "rate limit", "backoff"],
+        "security": ["AccessDenied", "permission", "policy"],
+    }
+    return list(hints.get(category, ["error", "timeout"]))
 
 
 def _load_payload(path: Path) -> dict[str, Any]:
@@ -490,6 +612,7 @@ def load_scenario(scenario_id: str | None = None) -> Scenario:
     scenarios = load_base_scenarios()
     if scenario_id is None:
         return scenarios[0]
+    scenario_id = canonical_scenario_id(scenario_id)
     for scenario in scenarios:
         if scenario.id == scenario_id:
             return scenario
