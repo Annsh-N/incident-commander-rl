@@ -44,6 +44,8 @@ def render_observation(obs: dict) -> str:
         f"Status: {obs['status']}",
         f"Severity: {obs['severity']}",
         f"Incident created: {obs['incident']['created']}",
+        f"Category: {obs['incident'].get('category', 'unknown')}",
+        f"Primary service: {obs['incident'].get('primary_service', 'unknown')}",
         f"Assigned roles: {roles}",
         "Alerts:",
         *alert_lines,

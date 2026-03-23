@@ -9,6 +9,9 @@ description = "Deterministic Incident Commander reinforcement learning environme
 requires-python = ">=3.10"
 dependencies = []
 
+[project.scripts]
+ic = "incident_commander_env.cli:main"
+
 [project.optional-dependencies]
 gym = ["gymnasium>=0.29,<2"]
 test = ["pytest>=8,<9"]
