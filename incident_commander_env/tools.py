@@ -1,11 +1,11 @@
-"""Deterministic tool simulators for Stage 2."""
+"""Deterministic tool simulators for Stage 3."""
 
 from __future__ import annotations
 
 from statistics import mean
 from typing import Any
 
-from .scenario import ConfigDiffEntry, Scenario
+from .scenario import Scenario
 
 
 def _last_n(values: list[float], count: int) -> list[float]:
@@ -88,7 +88,7 @@ def tool_get_logs(
     start_step = max(0, current_step - window_steps + 1)
     entries = [
         entry
-        for entry in scenario.evidence.logs_by_service[service]
+        for entry in scenario.evidence.logs_by_service.get(service, ())
         if start_step <= entry.step <= current_step
     ]
     query_text = query.casefold()
@@ -113,7 +113,7 @@ def tool_get_logs(
 def tool_get_trace_sample(trace_id: str, scenario: Scenario) -> dict[str, Any]:
     """Return a synthetic trace sample."""
 
-    sample = scenario.evidence.trace_samples[trace_id]
+    sample = next(sample for sample in scenario.evidence.trace_samples if sample.trace_id == trace_id)
     return {
         "service": sample.service,
         "trace_id": sample.trace_id,
@@ -162,14 +162,20 @@ def tool_diff_config(
 ) -> dict[str, Any]:
     """Return a structured config diff."""
 
-    diff = scenario.evidence.config_diffs[service][(from_version, to_version)]
+    record = next(
+        record
+        for record in scenario.evidence.config_diffs
+        if record.service == service
+        and record.from_version == from_version
+        and record.to_version == to_version
+    )
     return {
         "service": service,
         "from_version": from_version,
         "to_version": to_version,
         "diff": [
             {"key": entry.key, "from": entry.from_value, "to": entry.to_value}
-            for entry in diff
+            for entry in record.diff
         ],
     }
 

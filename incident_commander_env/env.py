@@ -77,9 +77,9 @@ class EnvState:
     roles_assigned: dict[str, str] = field(default_factory=dict)
     last_update_step: int | None = None
     updates_posted: list[dict[str, Any]] = field(default_factory=list)
-    mitigations_applied: list[str] = field(default_factory=list)
     proposed_mitigations: list[str] = field(default_factory=list)
     executed_changes: list[dict[str, Any]] = field(default_factory=list)
+    executed_mitigation_counts: dict[str, int] = field(default_factory=dict)
     unsafe_attempt: bool = False
     config_state: dict[str, str] = field(default_factory=dict)
     deploy_versions: dict[str, str] = field(default_factory=dict)
@@ -93,11 +93,13 @@ class EnvState:
     causal_change_planned: bool = False
     causal_change_evidence_met: bool = False
     last_executed_mitigation_id: str | None = None
-    confirmations: dict[str, bool] = field(default_factory=dict)
+    verification_results: dict[tuple[str, str], bool] = field(default_factory=dict)
     evidence_flags: dict[str, bool] = field(default_factory=dict)
     last_tool_results: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     action_signature_counts: dict[str, int] = field(default_factory=dict)
-    core_tool_rewarded: dict[str, bool] = field(default_factory=dict)
+    investigation_categories_used: set[str] = field(default_factory=set)
+    tool_rewarded: set[str] = field(default_factory=set)
+    rewarded_updates: set[tuple[str, str]] = field(default_factory=set)
     rewards_claimed: dict[str, bool] = field(default_factory=dict)
     seed: int | None = None
 
@@ -119,8 +121,15 @@ class IncidentCommanderEnv:
         self._rng = Random(seed if seed is not None else 0)
         scenario = self.scenario
         metrics = {
-            service: {metric: [] for metric in metric_map.keys()}
-            for service, metric_map in scenario.evidence.degraded_metrics.items()
+            service_name: {
+                metric: []
+                for metric in scenario.evidence.metric_profiles.get(service_name, {}).keys()
+            }
+            for service_name in scenario.evidence.services.keys()
+        }
+        verification_results = {
+            (requirement.service, requirement.metric): False
+            for requirement in scenario.resolution_rubric.required_verification
         }
         self.state = EnvState(
             current_step=0,
@@ -136,21 +145,19 @@ class IncidentCommanderEnv:
             deploy_versions=dict(scenario.deploy_versions),
             feature_flags=dict(scenario.feature_flags),
             service_replicas={
-                "checkout-service": 6,
-                "pricing-service": 4,
-                "orders-db": 1,
+                service.name: service.initial_replicas
+                for service in scenario.evidence.services.values()
             },
             service_restarts={
-                "checkout-service": 0,
-                "pricing-service": 0,
-                "orders-db": 0,
+                service.name: 0 for service in scenario.evidence.services.values()
             },
-            confirmations={"error_rate": False, "p95_latency": False},
+            verification_results=verification_results,
             evidence_flags={
                 "saw_deploy": False,
                 "saw_config_diff": False,
                 "saw_key_log": False,
                 "saw_timeout_trace": False,
+                "saw_runbook": False,
             },
             last_tool_results={
                 "metrics": None,
@@ -161,16 +168,12 @@ class IncidentCommanderEnv:
                 "runbook": None,
                 "health": None,
             },
-            core_tool_rewarded={"metrics": False, "logs": False, "deploy_config": False},
-            rewards_claimed={
-                "incident_created_early": False,
-                "initial_internal_update": False,
-                "status_update_after_mitigation": False,
-            },
+            rewards_claimed={"incident_created_early": False},
             seed=seed,
         )
         self._done = False
         self._replay.reset()
+        self._replay.set_context(scenario.id, seed)
         self._apply_timeline_events(0)
         self._append_metrics_for_step(0)
         self._refresh_service_health()
@@ -193,6 +196,7 @@ class IncidentCommanderEnv:
             "resolution": None,
             "debug": [],
             "tool_result": None,
+            "failure_reasons": [],
         }
 
         action_copy = deepcopy(action)
@@ -208,6 +212,7 @@ class IncidentCommanderEnv:
                 done = True
                 self.state.incident_status = "failed"
                 info["resolution"] = "failed"
+                info["failure_reasons"] = ["invalid_termination_action"]
         else:
             info["valid_action"] = True
             self.state.applied_actions.append(action_copy)
@@ -235,7 +240,6 @@ class IncidentCommanderEnv:
                 done = True
                 self.state.incident_status = "failed"
                 info["resolution"] = info["resolution"] or "timeout"
-                info.setdefault("failure_reasons", [])
                 info["failure_reasons"].append("timeout_exhausted")
                 info["debug"].append("Max steps reached before stable resolution.")
 
@@ -253,9 +257,14 @@ class IncidentCommanderEnv:
         return observation, reward, done, info
 
     def get_replay(self) -> list[dict[str, Any]]:
-        """Return a copy of the replay buffer."""
+        """Return the replay events."""
 
         return self._replay.as_list()
+
+    def save_replay(self, path: str) -> None:
+        """Persist the replay to disk as JSONL."""
+
+        self._replay.save_replay(path)
 
     def _apply_timeline_events(self, step: int) -> None:
         assert self.state is not None
@@ -306,56 +315,137 @@ class IncidentCommanderEnv:
 
     def _compute_metric_value(self, service: str, metric: str, step: int) -> float:
         assert self.state is not None
-        degraded = self.scenario.evidence.degraded_metrics[service][metric]
-        degraded_value = float(degraded[min(step, len(degraded) - 1)])
+        profile = self.scenario.evidence.metric_profiles[service][metric]
+        degraded_value = float(profile.degraded[min(step, len(profile.degraded) - 1)])
 
         if self.state.causal_fix_step is not None and step > self.state.causal_fix_step:
-            stabilized = self.scenario.evidence.stabilized_metrics[service][metric]
             offset = step - self.state.causal_fix_step - 1
-            return float(stabilized[min(offset, len(stabilized) - 1)])
+            return float(profile.stabilized[min(offset, len(profile.stabilized) - 1)])
 
-        if self.state.last_executed_mitigation_id is not None:
-            latest = self.state.last_executed_mitigation_id
-            if latest == "restart_checkout_service" and service == "checkout-service":
+        if self.state.executed_changes:
+            latest = self.state.executed_changes[-1]
+            latest_service = latest["details"].get("service")
+            latest_type = latest["change_type"]
+            if latest_service == service and latest_type == "restart_service":
+                if metric == "p95_latency":
+                    return max(0.0, degraded_value - 70.0)
+                if metric == "memory_usage":
+                    return max(0.0, degraded_value - 8.0)
                 if metric == "cpu":
-                    return max(45.0, degraded_value - 4.0)
+                    return max(0.0, degraded_value - 3.0)
+            if latest_service == service and latest_type == "scale_service":
                 if metric == "p95_latency":
-                    return degraded_value - 80.0
-            if latest == "scale_checkout_service" and service == "checkout-service":
-                if metric == "p95_latency":
-                    return degraded_value - 120.0
+                    return max(0.0, degraded_value - 110.0)
                 if metric == "error_rate":
-                    return max(5.5, degraded_value - 0.3)
+                    return max(0.0, degraded_value - 0.5)
+                if metric == "queue_depth":
+                    return max(0.0, degraded_value - 60.0)
+                if metric == "retry_rate":
+                    return max(0.0, degraded_value - 10.0)
+                if metric == "db_conn":
+                    return max(0.0, degraded_value - 5.0)
         return degraded_value
 
     def _refresh_service_health(self) -> None:
         assert self.state is not None
-        checkout_error = self.state.metrics["checkout-service"]["error_rate"][-1]
-        checkout_latency = self.state.metrics["checkout-service"]["p95_latency"][-1]
-        pricing_timeouts = self.state.metrics["pricing-service"]["pricing_timeouts"][-1]
-        db_conn = self.state.metrics["orders-db"]["db_conn"][-1]
+        health: dict[str, str] = {}
+        for service in self.scenario.evidence.services.keys():
+            relevant_checks = [
+                requirement
+                for requirement in self.scenario.resolution_rubric.required_verification
+                if requirement.service == service
+            ]
+            if relevant_checks:
+                healthy = True
+                for requirement in relevant_checks:
+                    current_value = self.state.metrics[service][requirement.metric][-1]
+                    if current_value > requirement.target:
+                        healthy = False
+                        break
+                health[service] = "healthy" if healthy else "degraded"
+            else:
+                metric_map = self.state.metrics[service]
+                if "error_rate" in metric_map and metric_map["error_rate"][-1] > 2.5:
+                    health[service] = "degraded"
+                else:
+                    health[service] = "healthy"
+        self.state.service_health = health
 
-        self.state.service_health = {
-            "checkout-service": "healthy"
-            if checkout_error < 2.0 and checkout_latency < 700.0
-            else "degraded",
-            "pricing-service": "healthy" if pricing_timeouts < 5.0 else "degraded",
-            "orders-db": "healthy" if db_conn < 80.0 else "degraded",
-        }
+    def _required_evidence_available(self) -> bool:
+        assert self.state is not None
+        required = self.scenario.resolution_rubric.required_evidence_flags
+        return all(self.state.evidence_flags.get(flag, False) for flag in required)
 
     def _refresh_resolved_state(self) -> None:
         assert self.state is not None
         waited_after_fix = (
             self.state.causal_fix_step is not None and self.state.current_step > self.state.causal_fix_step
         )
-        metrics_confirmed = self.state.confirmations["error_rate"] and self.state.confirmations["p95_latency"]
+        verifications_complete = all(
+            self.state.verification_results.get((requirement.service, requirement.metric), False)
+            for requirement in self.scenario.resolution_rubric.required_verification
+        )
+        enough_investigation = (
+            len(self.state.investigation_categories_used)
+            >= self.scenario.resolution_rubric.min_investigation_categories
+        )
         self.state.resolved_state = bool(
             self.state.causal_mitigation_id
             and self.state.causal_change_planned
             and self.state.causal_change_evidence_met
+            and enough_investigation
             and waited_after_fix
-            and metrics_confirmed
+            and verifications_complete
         )
+
+    def _rule_matches(self, action_type: str, args: dict[str, Any]) -> list[Any]:
+        matches = []
+        for rule in self.scenario.mitigation_rules:
+            if rule.action_type != action_type:
+                continue
+            if all(args.get(key) == value for key, value in rule.args_match.items()):
+                matches.append(rule)
+        return matches
+
+    def _record_matching_mitigations(self, action_type: str, args: dict[str, Any]) -> None:
+        assert self.state is not None
+        matches = self._rule_matches(action_type, args)
+        for rule in matches:
+            self.state.last_executed_mitigation_id = rule.mitigation_id
+            self.state.executed_changes.append(
+                {
+                    "step": self.state.current_step,
+                    "change_type": action_type,
+                    "mitigation_id": rule.mitigation_id,
+                    "planned": rule.mitigation_id in self.state.proposed_mitigations,
+                    "evidence_met": self._required_evidence_available(),
+                    "details": deepcopy(args),
+                }
+            )
+            self.state.executed_mitigation_counts[rule.mitigation_id] = (
+                self.state.executed_mitigation_counts.get(rule.mitigation_id, 0) + 1
+            )
+            if rule.forbidden:
+                self.state.unsafe_attempt = True
+
+        for causal_group in self.scenario.causal_action_sets:
+            required_counts: dict[str, int] = {}
+            for mitigation_id in causal_group:
+                required_counts[mitigation_id] = required_counts.get(mitigation_id, 0) + 1
+            satisfied = all(
+                self.state.executed_mitigation_counts.get(mitigation_id, 0) >= count
+                for mitigation_id, count in required_counts.items()
+            )
+            if satisfied:
+                primary_id = causal_group[0]
+                self.state.causal_mitigation_id = primary_id
+                self.state.causal_fix_step = self.state.current_step
+                self.state.causal_change_planned = primary_id in self.state.proposed_mitigations
+                self.state.causal_change_evidence_met = self._required_evidence_available()
+                for requirement in self.scenario.resolution_rubric.required_verification:
+                    self.state.verification_results[(requirement.service, requirement.metric)] = False
+                self.state.resolved_state = False
+                break
 
     def _apply_action(self, action: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
         assert self.state is not None
@@ -449,61 +539,23 @@ class IncidentCommanderEnv:
         elif action_type == "request_help":
             tool_result = tool_request_help(args["team"], self.scenario)
         elif action_type == "apply_mitigation":
-            mitigation_id = args["mitigation_id"]
-            self.state.proposed_mitigations.append(mitigation_id)
+            self.state.proposed_mitigations.append(args["mitigation_id"])
         elif action_type == "toggle_feature_flag":
             self.state.feature_flags[args["flag"]] = args["enabled"]
-            if args["flag"] == "new_pricing_path" and args["enabled"] is False:
-                self._record_change_effect(
-                    mitigation_id="disable_new_pricing_path",
-                    change_type="toggle_feature_flag",
-                    details={"flag": args["flag"], "enabled": args["enabled"]},
-                )
+            self._record_matching_mitigations(action_type, args)
         elif action_type == "apply_config_patch":
             patch_id = args["patch_id"]
             self.state.config_state[args["service"]] = f"{self.state.config_state[args['service']]}+{patch_id}"
-            if args["service"] == "checkout-service" and patch_id == "fix_pricing_url_v42":
-                self._record_change_effect(
-                    mitigation_id="revert_pricing_url_config",
-                    change_type="apply_config_patch",
-                    details={"service": args["service"], "patch_id": patch_id},
-                )
+            self._record_matching_mitigations(action_type, args)
         elif action_type == "rollback_deploy":
             self.state.deploy_versions[args["service"]] = args["to_version"]
-            if args["service"] == "checkout-service" and args["to_version"] == "v41":
-                self._record_change_effect(
-                    mitigation_id="rollback_checkout_v42_to_v41",
-                    change_type="rollback_deploy",
-                    details={
-                        "service": args["service"],
-                        "from_version": args["from_version"],
-                        "to_version": args["to_version"],
-                    },
-                )
+            self._record_matching_mitigations(action_type, args)
         elif action_type == "restart_service":
             self.state.service_restarts[args["service"]] += 1
-            mitigation_id = self._map_service_change_to_mitigation(
-                action_type="restart_service",
-                service=args["service"],
-            )
-            if mitigation_id is not None:
-                self._record_change_effect(
-                    mitigation_id=mitigation_id,
-                    change_type="restart_service",
-                    details={"service": args["service"]},
-                )
+            self._record_matching_mitigations(action_type, args)
         elif action_type == "scale_service":
             self.state.service_replicas[args["service"]] = args["replicas"]
-            mitigation_id = self._map_service_change_to_mitigation(
-                action_type="scale_service",
-                service=args["service"],
-            )
-            if mitigation_id is not None:
-                self._record_change_effect(
-                    mitigation_id=mitigation_id,
-                    change_type="scale_service",
-                    details={"service": args["service"], "replicas": args["replicas"]},
-                )
+            self._record_matching_mitigations(action_type, args)
         elif action_type == "run_health_check":
             healthy = self.state.service_health[args["service"]] == "healthy"
             tool_result = {
@@ -534,67 +586,13 @@ class IncidentCommanderEnv:
                 "actual": actual,
                 "confirmed": confirmed,
             }
-            if args["service"] == "checkout-service" and args["metric"] in self.state.confirmations:
-                self.state.confirmations[args["metric"]] = confirmed
+            for requirement in self.scenario.resolution_rubric.required_verification:
+                if requirement.service == args["service"] and requirement.metric == args["metric"]:
+                    self.state.verification_results[(requirement.service, requirement.metric)] = (
+                        actual <= requirement.target
+                    )
             self._refresh_resolved_state()
         elif action_type in {"declare_resolved", "declare_failed"}:
             tool_result = None
 
         return tool_result, applied
-
-    def _map_service_change_to_mitigation(
-        self,
-        action_type: str,
-        service: str,
-    ) -> str | None:
-        if action_type == "restart_service":
-            if service == "checkout-service":
-                return "restart_checkout_service"
-            if service == "orders-db":
-                return "restart_database"
-            return None
-        if action_type == "scale_service":
-            if service == "checkout-service":
-                return "scale_checkout_service"
-            if service == "orders-db":
-                return "scale_database"
-            return None
-        return None
-
-    def _has_required_evidence(self) -> bool:
-        assert self.state is not None
-        return any(
-            (
-                self.state.evidence_flags["saw_config_diff"],
-                self.state.evidence_flags["saw_key_log"],
-                self.state.evidence_flags["saw_deploy"],
-            )
-        )
-
-    def _record_change_effect(
-        self,
-        mitigation_id: str,
-        change_type: str,
-        details: dict[str, Any],
-    ) -> None:
-        assert self.state is not None
-        self.state.last_executed_mitigation_id = mitigation_id
-        self.state.executed_changes.append(
-            {
-                "step": self.state.current_step,
-                "change_type": change_type,
-                "mitigation_id": mitigation_id,
-                "planned": mitigation_id in self.state.proposed_mitigations,
-                "evidence_met": self._has_required_evidence(),
-                "details": deepcopy(details),
-            }
-        )
-        if mitigation_id not in self.state.mitigations_applied:
-            self.state.mitigations_applied.append(mitigation_id)
-        if mitigation_id in self.scenario.allowed_mitigations:
-            self.state.causal_mitigation_id = mitigation_id
-            self.state.causal_fix_step = self.state.current_step
-            self.state.causal_change_planned = mitigation_id in self.state.proposed_mitigations
-            self.state.causal_change_evidence_met = self._has_required_evidence()
-            self.state.confirmations = {"error_rate": False, "p95_latency": False}
-            self.state.resolved_state = False

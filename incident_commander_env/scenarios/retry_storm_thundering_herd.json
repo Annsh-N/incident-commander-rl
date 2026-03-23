@@ -1,0 +1,119 @@
+{
+  "id": "retry-storm-thundering-herd",
+  "title": "Retry storm amplifying partial latency into an outage",
+  "description": "A new aggressive retry policy turned a small dependency slowdown into a retry storm. The correct fix is to disable the retry mode and communicate externally while user impact is active.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "aggressive_retry_policy_created_thundering_herd",
+  "services": [
+    {"name": "api-gateway", "description": "External API entrypoint.", "dependencies": ["inventory-service"], "owner": "edge", "initial_replicas": 6},
+    {"name": "inventory-service", "description": "Inventory dependency.", "dependencies": [], "owner": "inventory", "initial_replicas": 4},
+    {"name": "rate-limiter", "description": "Ingress rate limiter.", "dependencies": [], "owner": "platform", "initial_replicas": 2}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-retry-rate", "service": "api-gateway", "signal": "retry_rate > 50"},
+        {"id": "alert-api-latency", "service": "api-gateway", "signal": "p95_latency > 1400ms"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "slo-bot", "text": "Public API latency is elevated across regions."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "api-gateway": {
+        "retry_rate": {"degraded": [58, 74, 88, 95, 93, 89, 84], "stabilized": [28, 12, 5, 3, 3]},
+        "p95_latency": {"degraded": [1280, 1490, 1660, 1730, 1690, 1640, 1600], "stabilized": [990, 700, 560, 500, 490]},
+        "error_rate": {"degraded": [3.2, 4.0, 4.6, 4.9, 4.8, 4.6, 4.5], "stabilized": [2.5, 1.8, 1.1, 0.8, 0.8]}
+      },
+      "inventory-service": {
+        "cpu": {"degraded": [47, 48, 49, 49, 49, 48, 48], "stabilized": [47, 46, 46, 46, 46]}
+      }
+    },
+    "logs": {
+      "api-gateway": [
+        {"step": 0, "service": "api-gateway", "level": "WARN", "message": "retry policy aggressive_retries enabled attempts=5"},
+        {"step": 1, "service": "api-gateway", "level": "ERROR", "message": "retry storm detected for inventory-service upstream"},
+        {"step": 2, "service": "api-gateway", "level": "WARN", "message": "client timeout budgets exhausted after retries"}
+      ],
+      "inventory-service": [
+        {"step": 1, "service": "inventory-service", "level": "WARN", "message": "request volume doubled with duplicate calls"},
+        {"step": 2, "service": "inventory-service", "level": "INFO", "message": "service healthy but overwhelmed by retries"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "api-gateway", "step": -1, "from_version": "v44", "to_version": "v45", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "api-gateway",
+        "from_version": "v44",
+        "to_version": "v45",
+        "diff": [
+          {"key": "AGGRESSIVE_RETRIES", "from": "false", "to": "true"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "api-gateway",
+        "trace_id": "trace-retry-001",
+        "spans": [
+          {"service": "api-gateway", "operation": "GET /inventory", "duration_ms": 1680, "status": "error"},
+          {"service": "inventory-service", "operation": "GET /stock", "duration_ms": 380, "status": "ok"}
+        ],
+        "error": "client retries amplified dependency latency",
+        "duration_ms": 1680
+      }
+    ],
+    "runbook_snippets": {
+      "api-gateway": {
+        "triage": ["Correlate retry_rate with dependency latency before scaling."],
+        "mitigation": ["Disable aggressive retries or enable rate limiting."],
+        "verification": ["Retry rate and p95 latency should drop together."]
+      }
+    },
+    "help_responses": {
+      "db": "Database is not involved.",
+      "network": "No regional packet loss observed.",
+      "pricing": "Pricing is unrelated.",
+      "platform": "Platform suggests disabling the retry policy immediately and posting an external update."
+    }
+  },
+  "patch_ids": {"api-gateway": []},
+  "feature_flags": {"aggressive_retries": true},
+  "deploy_versions": {"api-gateway": "v45", "inventory-service": "v11", "rate-limiter": "v7"},
+  "config_versions": {"api-gateway": "v45", "inventory-service": "v11", "rate-limiter": "v7"},
+  "allowed_mitigations": ["disable_aggressive_retries"],
+  "safe_mitigations": ["disable_aggressive_retries", "scale_api_gateway"],
+  "forbidden_mitigations": ["purge_queue", "restart_database"],
+  "all_mitigations": ["disable_aggressive_retries", "scale_api_gateway", "purge_queue", "restart_database"],
+  "mitigation_rules": [
+    {"mitigation_id": "disable_aggressive_retries", "action_type": "toggle_feature_flag", "args_match": {"flag": "aggressive_retries", "enabled": false}, "causal": true},
+    {"mitigation_id": "scale_api_gateway", "action_type": "scale_service", "args_match": {"service": "api-gateway", "replicas": 10}, "causal": false}
+  ],
+  "causal_action_sets": [["disable_aggressive_retries"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_config_diff"],
+    "required_updates": [
+      {"template_id": "status", "audience": "internal"},
+      {"template_id": "status", "audience": "external"},
+      {"template_id": "resolved", "audience": "internal"}
+    ],
+    "required_verification": [
+      {"service": "api-gateway", "metric": "retry_rate", "target": 15.0, "window_steps": 1},
+      {"service": "api-gateway", "metric": "p95_latency", "target": 700.0, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["retry storm", "aggressive_retries enabled"],
+    "deploy_service": "api-gateway",
+    "deploy_to_version": "v45",
+    "config_keys": ["AGGRESSIVE_RETRIES"],
+    "trace_error_terms": ["retries amplified"]
+  }
+}

@@ -12,6 +12,10 @@ METRIC_NAMES: tuple[str, ...] = (
     "pricing_timeouts",
     "db_conn",
     "queue_depth",
+    "memory_usage",
+    "retry_rate",
+    "dependency_503_rate",
+    "access_denied_rate",
 )
 
 RUNBOOK_SECTIONS: tuple[str, ...] = ("triage", "mitigation", "verification")

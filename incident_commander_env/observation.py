@@ -52,14 +52,10 @@ def build_observation(env_state: Any, scenario: Any) -> dict[str, Any]:
     """Build a structured observation from environment state."""
 
     step = env_state.current_step
-    metrics_snapshot = {
-        "error_rate": float(env_state.metrics["checkout-service"]["error_rate"][-1]),
-        "p95_latency": float(env_state.metrics["checkout-service"]["p95_latency"][-1]),
-        "cpu": float(env_state.metrics["checkout-service"]["cpu"][-1]),
-        "pricing_timeouts": float(env_state.metrics["pricing-service"]["pricing_timeouts"][-1]),
-        "db_conn": float(env_state.metrics["orders-db"]["db_conn"][-1]),
-        "queue_depth": float(env_state.metrics["checkout-service"]["queue_depth"][-1]),
-    }
+    metrics_snapshot: dict[str, float] = {}
+    for service_metrics in env_state.metrics.values():
+        for metric_name, series in service_metrics.items():
+            metrics_snapshot.setdefault(metric_name, float(series[-1]))
     alerts = [
         {
             "id": alert.id,

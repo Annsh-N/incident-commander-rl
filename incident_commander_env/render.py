@@ -14,13 +14,8 @@ def render_observation(obs: dict) -> str:
         alert_lines = ["- none"]
 
     metric_snapshot = obs["metrics_snapshot"]
-    metrics_line = (
-        f"error_rate={metric_snapshot['error_rate']:.2f}, "
-        f"p95_latency={metric_snapshot['p95_latency']:.2f}, "
-        f"cpu={metric_snapshot['cpu']:.2f}, "
-        f"pricing_timeouts={metric_snapshot['pricing_timeouts']:.2f}, "
-        f"db_conn={metric_snapshot['db_conn']:.2f}, "
-        f"queue_depth={metric_snapshot['queue_depth']:.2f}"
+    metrics_line = ", ".join(
+        f"{metric}={value:.2f}" for metric, value in sorted(metric_snapshot.items())
     )
 
     message_lines = [

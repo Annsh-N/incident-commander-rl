@@ -1,0 +1,120 @@
+{
+  "id": "memory-leak-after-deploy",
+  "title": "Memory leak introduced by recent checkout deployment",
+  "description": "A new checkout build leaks memory under steady load. CPU stays moderate, but memory climbs until OOM kills start. Restarting alone buys little time unless the bad build is removed.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "checkout_memory_leak_after_v52_deploy",
+  "services": [
+    {"name": "checkout-api", "description": "Checkout frontend API.", "dependencies": ["recommendation-engine"], "owner": "payments", "initial_replicas": 6},
+    {"name": "recommendation-engine", "description": "Recommendation sidecar dependency.", "dependencies": [], "owner": "ml", "initial_replicas": 4},
+    {"name": "orders-db", "description": "Orders database.", "dependencies": [], "owner": "db", "initial_replicas": 1}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-checkout-memory", "service": "checkout-api", "signal": "memory_usage > 90"},
+        {"id": "alert-checkout-oom", "service": "checkout-api", "signal": "oom_kill_count > 0"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "deploy-bot", "text": "checkout-api v52 rollout completed an hour ago."}
+      ]
+    },
+    {
+      "step": 2,
+      "messages": [
+        {"ts_step": 2, "sender": "support", "text": "Users report checkout failures that recover briefly after pod restarts."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-api": {
+        "memory_usage": {"degraded": [78, 84, 89, 93, 96, 97, 97], "stabilized": [72, 64, 58, 54, 52]},
+        "error_rate": {"degraded": [2.8, 3.9, 5.1, 6.2, 6.5, 6.4, 6.2], "stabilized": [2.6, 1.8, 1.1, 0.8, 0.8]},
+        "p95_latency": {"degraded": [980, 1110, 1260, 1390, 1450, 1430, 1400], "stabilized": [900, 660, 540, 490, 470]},
+        "cpu": {"degraded": [49, 50, 52, 53, 54, 54, 53], "stabilized": [49, 48, 47, 46, 46]}
+      },
+      "recommendation-engine": {
+        "cpu": {"degraded": [46, 46, 47, 47, 47, 46, 46], "stabilized": [46, 46, 45, 45, 45]}
+      }
+    },
+    "logs": {
+      "checkout-api": [
+        {"step": 0, "service": "checkout-api", "level": "INFO", "message": "Booting checkout-api version=v52"},
+        {"step": 1, "service": "checkout-api", "level": "WARN", "message": "heap usage climbed above 88% after 6 minutes"},
+        {"step": 2, "service": "checkout-api", "level": "ERROR", "message": "process killed by OOM killer after allocation failure"},
+        {"step": 2, "service": "checkout-api", "level": "WARN", "message": "recommendation-engine latency stable at 90ms"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "checkout-api", "step": 0, "from_version": "v51", "to_version": "v52", "author": "deploy-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "checkout-api",
+        "from_version": "v51",
+        "to_version": "v52",
+        "diff": [
+          {"key": "RECOMMENDATION_CACHE_SIZE", "from": "256", "to": "1024"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-api",
+        "trace_id": "trace-memory-001",
+        "spans": [
+          {"service": "checkout-api", "operation": "POST /checkout", "duration_ms": 1410, "status": "error"},
+          {"service": "recommendation-engine", "operation": "GET /upsell", "duration_ms": 91, "status": "ok"}
+        ],
+        "error": "worker restarted after out of memory",
+        "duration_ms": 1410
+      }
+    ],
+    "runbook_snippets": {
+      "checkout-api": {
+        "triage": ["Check memory growth after recent deploys.", "OOM kills after deploy usually mean rollback is safer than blind restarts."],
+        "mitigation": ["Rollback the leaking build.", "A restart can buy time but will not remove the leak."],
+        "verification": ["Confirm memory_usage and error_rate fall after rollback."]
+      }
+    },
+    "help_responses": {
+      "db": "DB is healthy and not saturated.",
+      "network": "No network anomaly detected.",
+      "pricing": "Pricing is not implicated in the memory pressure.",
+      "platform": "Platform suggests checking OOM kill logs and the most recent checkout deployment."
+    }
+  },
+  "patch_ids": {"checkout-api": []},
+  "feature_flags": {"recommendation_cache_v2": true},
+  "deploy_versions": {"checkout-api": "v52", "recommendation-engine": "v8", "orders-db": "db-2026-03-11"},
+  "config_versions": {"checkout-api": "v52", "recommendation-engine": "v8", "orders-db": "db-2026-03-11"},
+  "allowed_mitigations": ["rollback_checkout_v52_to_v51"],
+  "safe_mitigations": ["rollback_checkout_v52_to_v51", "restart_checkout_service"],
+  "forbidden_mitigations": ["restart_database", "purge_queue"],
+  "all_mitigations": ["rollback_checkout_v52_to_v51", "restart_checkout_service", "restart_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "rollback_checkout_v52_to_v51", "action_type": "rollback_deploy", "args_match": {"service": "checkout-api", "from_version": "v52", "to_version": "v51"}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-api"}, "causal": false},
+    {"mitigation_id": "restart_database", "action_type": "restart_service", "args_match": {"service": "orders-db"}, "causal": false, "forbidden": true}
+  ],
+  "causal_action_sets": [["rollback_checkout_v52_to_v51"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_deploy", "saw_key_log"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "checkout-api", "metric": "memory_usage", "target": 70.0, "window_steps": 1},
+      {"service": "checkout-api", "metric": "error_rate", "target": 2.5, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["OOM killer", "allocation failure"],
+    "deploy_service": "checkout-api",
+    "deploy_to_version": "v52",
+    "config_keys": ["RECOMMENDATION_CACHE_SIZE"],
+    "trace_error_terms": ["out of memory"]
+  }
+}

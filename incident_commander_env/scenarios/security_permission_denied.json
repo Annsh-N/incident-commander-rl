@@ -1,0 +1,121 @@
+{
+  "id": "security-permission-denied",
+  "title": "Permission denied after policy rollout",
+  "description": "A policy rollout removed a required permission from checkout. Calls to receipt generation now fail with access denied until the IAM policy version is rolled back.",
+  "severity": "sev1",
+  "ground_truth_root_cause_id": "checkout_iam_policy_removed_receipt_permission",
+  "services": [
+    {"name": "checkout-api", "description": "Checkout API.", "dependencies": ["receipt-service", "iam-proxy"], "owner": "payments", "initial_replicas": 5},
+    {"name": "receipt-service", "description": "Receipt rendering service.", "dependencies": [], "owner": "receipts", "initial_replicas": 3},
+    {"name": "iam-proxy", "description": "Policy enforcement proxy.", "dependencies": [], "owner": "security", "initial_replicas": 2}
+  ],
+  "timeline_events": [
+    {
+      "step": 0,
+      "alerts": [
+        {"id": "alert-access-denied", "service": "checkout-api", "signal": "access_denied_rate > 15"},
+        {"id": "alert-checkout-errors", "service": "checkout-api", "signal": "error_rate > 4%"}
+      ],
+      "messages": [
+        {"ts_step": 0, "sender": "security-bot", "text": "IAM policy version checkout-policy-v19 rolled out."}
+      ]
+    },
+    {
+      "step": 2,
+      "messages": [
+        {"ts_step": 2, "sender": "support", "text": "Users are charged but cannot download receipts."}
+      ]
+    }
+  ],
+  "evidence": {
+    "metrics": {
+      "checkout-api": {
+        "error_rate": {"degraded": [4.2, 5.1, 5.8, 5.9, 5.7, 5.6, 5.5], "stabilized": [2.9, 1.9, 1.2, 0.9, 0.8]},
+        "access_denied_rate": {"degraded": [18, 24, 31, 34, 32, 30, 28], "stabilized": [11, 4, 2, 1, 1]},
+        "p95_latency": {"degraded": [920, 1020, 1130, 1160, 1140, 1120, 1100], "stabilized": [850, 640, 550, 510, 500]}
+      },
+      "receipt-service": {
+        "cpu": {"degraded": [32, 33, 33, 33, 33, 32, 32], "stabilized": [32, 32, 32, 32, 32]}
+      }
+    },
+    "logs": {
+      "checkout-api": [
+        {"step": 0, "service": "checkout-api", "level": "ERROR", "message": "AccessDenied for action receipt:GenerateReceipt policy=checkout-policy-v19"},
+        {"step": 1, "service": "checkout-api", "level": "WARN", "message": "receipt-service responded 403 due to missing role permission"},
+        {"step": 2, "service": "checkout-api", "level": "INFO", "message": "payment capture success unchanged"}
+      ],
+      "iam-proxy": [
+        {"step": 1, "service": "iam-proxy", "level": "WARN", "message": "denied action receipt:GenerateReceipt principal=checkout-api"},
+        {"step": 2, "service": "iam-proxy", "level": "INFO", "message": "policy version checkout-policy-v19 active"}
+      ]
+    },
+    "deploy_history": [
+      {"service": "iam-proxy", "step": 0, "from_version": "checkout-policy-v18", "to_version": "checkout-policy-v19", "author": "security-bot"}
+    ],
+    "config_diffs": [
+      {
+        "service": "iam-proxy",
+        "from_version": "checkout-policy-v18",
+        "to_version": "checkout-policy-v19",
+        "diff": [
+          {"key": "ALLOW_RECEIPT_GENERATE", "from": "true", "to": "false"}
+        ]
+      }
+    ],
+    "trace_samples": [
+      {
+        "service": "checkout-api",
+        "trace_id": "trace-iam-001",
+        "spans": [
+          {"service": "checkout-api", "operation": "POST /checkout", "duration_ms": 1110, "status": "error"},
+          {"service": "receipt-service", "operation": "POST /receipt", "duration_ms": 140, "status": "403"}
+        ],
+        "error": "permission denied when generating receipt",
+        "duration_ms": 1110
+      }
+    ],
+    "runbook_snippets": {
+      "iam-proxy": {
+        "triage": ["Permission denied after a policy rollout usually requires checking the policy diff."],
+        "mitigation": ["Roll back the bad policy version or restore the removed permission."],
+        "verification": ["Access denied errors should drop to near zero after the rollback."]
+      }
+    },
+    "help_responses": {
+      "db": "Database is healthy.",
+      "network": "No network issue detected.",
+      "pricing": "Pricing is not part of the receipt path.",
+      "platform": "Platform suggests reading the IAM runbook and diffing the last policy version."
+    }
+  },
+  "patch_ids": {"iam-proxy": ["rollback_receipt_permission"]},
+  "feature_flags": {"receipt_async_path": true},
+  "deploy_versions": {"checkout-api": "v38", "receipt-service": "v17", "iam-proxy": "checkout-policy-v19"},
+  "config_versions": {"checkout-api": "v38", "receipt-service": "v17", "iam-proxy": "checkout-policy-v19"},
+  "allowed_mitigations": ["rollback_receipt_permission"],
+  "safe_mitigations": ["rollback_receipt_permission", "restart_checkout_service"],
+  "forbidden_mitigations": ["restart_database", "purge_queue"],
+  "all_mitigations": ["rollback_receipt_permission", "restart_checkout_service", "restart_database", "purge_queue"],
+  "mitigation_rules": [
+    {"mitigation_id": "rollback_receipt_permission", "action_type": "apply_config_patch", "args_match": {"service": "iam-proxy", "patch_id": "rollback_receipt_permission"}, "causal": true},
+    {"mitigation_id": "restart_checkout_service", "action_type": "restart_service", "args_match": {"service": "checkout-api"}, "causal": false}
+  ],
+  "causal_action_sets": [["rollback_receipt_permission"]],
+  "resolution_rubric": {
+    "required_evidence_flags": ["saw_key_log", "saw_config_diff", "saw_runbook"],
+    "required_updates": [{"template_id": "status", "audience": "internal"}, {"template_id": "resolved", "audience": "internal"}],
+    "required_verification": [
+      {"service": "checkout-api", "metric": "access_denied_rate", "target": 5.0, "window_steps": 1},
+      {"service": "checkout-api", "metric": "error_rate", "target": 2.5, "window_steps": 1}
+    ],
+    "min_investigation_categories": 2,
+    "create_incident_by": 3
+  },
+  "evidence_markers": {
+    "key_log_terms": ["AccessDenied", "missing role permission"],
+    "deploy_service": "iam-proxy",
+    "deploy_to_version": "checkout-policy-v19",
+    "config_keys": ["ALLOW_RECEIPT_GENERATE"],
+    "trace_error_terms": ["permission denied"]
+  }
+}

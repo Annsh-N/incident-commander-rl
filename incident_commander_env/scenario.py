@@ -1,8 +1,11 @@
-"""Scenario definitions and loading for the Incident Commander environment."""
+"""Scenario loading and serialization for Stage 3."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,15 @@ class ServiceDefinition:
     description: str
     dependencies: tuple[str, ...]
     owner: str
+    initial_replicas: int = 2
+
+
+@dataclass(frozen=True)
+class MetricSeries:
+    """Degraded and stabilized metric profiles."""
+
+    degraded: tuple[float, ...]
+    stabilized: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,16 @@ class ConfigDiffEntry:
 
 
 @dataclass(frozen=True)
+class ConfigDiffRecord:
+    """A config diff between two versions."""
+
+    service: str
+    from_version: str
+    to_version: str
+    diff: tuple[ConfigDiffEntry, ...]
+
+
+@dataclass(frozen=True)
 class TraceSpan:
     """A synthetic trace span."""
 
@@ -95,23 +117,62 @@ class TraceSample:
 
 
 @dataclass(frozen=True)
+class UpdateRequirement:
+    """A required communication update."""
+
+    template_id: str
+    audience: str
+
+
+@dataclass(frozen=True)
+class VerificationRequirement:
+    """A required verification check."""
+
+    service: str
+    metric: str
+    target: float
+    window_steps: int
+
+
+@dataclass(frozen=True)
+class MitigationRule:
+    """Maps a concrete action to a mitigation identifier."""
+
+    mitigation_id: str
+    action_type: str
+    args_match: dict[str, Any]
+    causal: bool
+    forbidden: bool = False
+
+
+@dataclass(frozen=True)
+class ResolutionRubric:
+    """Scenario-specific resolution requirements."""
+
+    required_evidence_flags: tuple[str, ...]
+    required_updates: tuple[UpdateRequirement, ...]
+    required_verification: tuple[VerificationRequirement, ...]
+    min_investigation_categories: int
+    create_incident_by: int
+
+
+@dataclass(frozen=True)
 class ScenarioEvidence:
     """Deterministic scenario evidence used by tools."""
 
     services: dict[str, ServiceDefinition]
-    degraded_metrics: dict[str, dict[str, tuple[float, ...]]]
-    stabilized_metrics: dict[str, dict[str, tuple[float, ...]]]
+    metric_profiles: dict[str, dict[str, MetricSeries]]
     logs_by_service: dict[str, tuple[LogEntry, ...]]
     deploy_history: tuple[DeployEvent, ...]
-    config_diffs: dict[str, dict[tuple[str, str], tuple[ConfigDiffEntry, ...]]]
-    trace_samples: dict[str, TraceSample]
+    config_diffs: tuple[ConfigDiffRecord, ...]
+    trace_samples: tuple[TraceSample, ...]
     runbook_snippets: dict[str, dict[str, tuple[str, ...]]]
     help_responses: dict[str, str]
 
 
 @dataclass(frozen=True)
 class Scenario:
-    """A single incident scenario."""
+    """A single incident scenario or deterministic variant."""
 
     id: str
     title: str
@@ -128,289 +189,308 @@ class Scenario:
     config_versions: dict[str, str]
     timeline_events: list[TimelineEvent]
     evidence: ScenarioEvidence
+    mitigation_rules: tuple[MitigationRule, ...]
+    causal_action_sets: tuple[tuple[str, ...], ...]
+    resolution_rubric: ResolutionRubric
+    evidence_markers: dict[str, Any]
+    variant_of: str | None = None
+    variant_seed: int | None = None
+    variant_ops: tuple[str, ...] = ()
 
 
-def load_scenario() -> Scenario:
-    """Return the hard-coded Stage 2 scenario."""
+SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
 
-    services = {
-        "checkout-service": ServiceDefinition(
-            name="checkout-service",
-            description="Customer-facing checkout API handling cart submission and pricing lookups.",
-            dependencies=("pricing-service", "orders-db"),
-            owner="payments",
-        ),
-        "pricing-service": ServiceDefinition(
-            name="pricing-service",
-            description="Internal service that calculates cart pricing and discounts.",
-            dependencies=("orders-db",),
-            owner="pricing",
-        ),
-        "orders-db": ServiceDefinition(
-            name="orders-db",
-            description="Primary database for order and cart persistence.",
-            dependencies=(),
-            owner="db",
-        ),
-    }
 
-    degraded_metrics = {
-        "checkout-service": {
-            "error_rate": (6.8, 7.6, 8.8, 9.2, 9.0, 8.7, 8.4, 8.2, 8.0, 7.8, 7.7, 7.6),
-            "p95_latency": (
-                1320.0,
-                1480.0,
-                1595.0,
-                1660.0,
-                1635.0,
-                1600.0,
-                1560.0,
-                1535.0,
-                1510.0,
-                1490.0,
-                1475.0,
-                1460.0,
-            ),
-            "cpu": (58.0, 61.0, 63.0, 64.0, 63.0, 62.0, 61.0, 60.0, 60.0, 59.0, 59.0, 58.0),
-            "queue_depth": (24.0, 32.0, 40.0, 46.0, 44.0, 42.0, 40.0, 39.0, 37.0, 36.0, 35.0, 35.0),
-        },
-        "pricing-service": {
-            "pricing_timeouts": (22.0, 31.0, 38.0, 42.0, 41.0, 39.0, 37.0, 36.0, 34.0, 33.0, 32.0, 31.0),
-            "cpu": (46.0, 47.0, 48.0, 49.0, 48.0, 48.0, 47.0, 47.0, 46.0, 46.0, 45.0, 45.0),
-        },
-        "orders-db": {
-            "db_conn": (64.0, 66.0, 67.0, 69.0, 68.0, 68.0, 67.0, 67.0, 66.0, 66.0, 65.0, 65.0),
-            "cpu": (38.0, 39.0, 39.0, 40.0, 40.0, 39.0, 39.0, 39.0, 38.0, 38.0, 38.0, 37.0),
-        },
-    }
+def _tuple_of_strings(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(values)
 
-    stabilized_metrics = {
-        "checkout-service": {
-            "error_rate": (3.2, 1.8, 1.1, 0.8, 0.6, 0.6),
-            "p95_latency": (920.0, 640.0, 510.0, 470.0, 450.0, 445.0),
-            "cpu": (56.0, 53.0, 50.0, 48.0, 47.0, 47.0),
-            "queue_depth": (22.0, 15.0, 9.0, 6.0, 5.0, 5.0),
-        },
-        "pricing-service": {
-            "pricing_timeouts": (10.0, 4.0, 2.0, 1.0, 1.0, 1.0),
-            "cpu": (45.0, 44.0, 43.0, 43.0, 42.0, 42.0),
-        },
-        "orders-db": {
-            "db_conn": (63.0, 62.0, 61.0, 60.0, 60.0, 60.0),
-            "cpu": (37.0, 37.0, 36.0, 36.0, 36.0, 35.0),
-        },
-    }
 
-    logs_by_service = {
-        "checkout-service": (
-            LogEntry(step=0, service="checkout-service", level="INFO", message="Booting checkout-service version=v42"),
-            LogEntry(step=0, service="checkout-service", level="INFO", message="Loaded 18 feature flags successfully"),
-            LogEntry(step=0, service="checkout-service", level="WARN", message="Retry budget increased for guest checkouts"),
-            LogEntry(step=0, service="checkout-service", level="INFO", message="Cart hydration completed trace_id=trace-bootstrap"),
-            LogEntry(step=1, service="checkout-service", level="WARN", message="pricing client timeout caller=checkout-service retry=1"),
-            LogEntry(step=1, service="checkout-service", level="INFO", message="Worker heartbeat ok shard=3"),
-            LogEntry(step=1, service="checkout-service", level="ERROR", message="ENV PRICING_URL invalid: http://pricing:8080v1"),
-            LogEntry(step=1, service="checkout-service", level="ERROR", message="checkout request failed cause=pricing timeout trace_id=trace-001"),
-            LogEntry(step=2, service="checkout-service", level="WARN", message="upstream pricing timeout duration_ms=1500 trace_id=trace-002"),
-            LogEntry(step=2, service="checkout-service", level="INFO", message="abandoned cart worker flush completed"),
-            LogEntry(step=3, service="checkout-service", level="WARN", message="queue lag detected but within threshold"),
-            LogEntry(step=3, service="checkout-service", level="INFO", message="request trace_id=trace-003 cart fetch succeeded"),
-        ),
-        "pricing-service": (
-            LogEntry(step=0, service="pricing-service", level="INFO", message="pricing-service ready"),
-            LogEntry(step=1, service="pricing-service", level="WARN", message="client timeouts increased caller=checkout-service"),
-            LogEntry(step=2, service="pricing-service", level="INFO", message="cpu stable at 46%"),
-            LogEntry(step=2, service="pricing-service", level="WARN", message="upstream callers timing out before response completion"),
-        ),
-        "orders-db": (
-            LogEntry(step=0, service="orders-db", level="INFO", message="connection pool healthy active=64"),
-            LogEntry(step=2, service="orders-db", level="INFO", message="query latency stable p95=12ms"),
-        ),
-    }
+def _load_payload(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
-    deploy_history = (
-        DeployEvent(
-            service="checkout-service",
-            step=0,
-            from_version="v41",
-            to_version="v42",
-            author="deploy-bot",
-        ),
-        DeployEvent(
-            service="pricing-service",
-            step=-3,
-            from_version="v16",
-            to_version="v17",
-            author="deploy-bot",
-        ),
-    )
 
-    config_diffs = {
-        "checkout-service": {
-            ("v41", "v42"): (
-                ConfigDiffEntry(
-                    key="PRICING_URL",
-                    from_value="http://pricing:8080/v1",
-                    to_value="http://pricing:8080v1",
-                ),
-                ConfigDiffEntry(
-                    key="NEW_PRICING_PATH_ENABLED",
-                    from_value="false",
-                    to_value="true",
-                ),
-                ConfigDiffEntry(
-                    key="MAX_CART_RETRIES",
-                    from_value="2",
-                    to_value="1",
-                ),
+def _metric_profiles_from_payload(payload: dict[str, Any]) -> dict[str, dict[str, MetricSeries]]:
+    profiles: dict[str, dict[str, MetricSeries]] = {}
+    for service, metrics in payload.items():
+        profiles[service] = {}
+        for metric_name, series_payload in metrics.items():
+            profiles[service][metric_name] = MetricSeries(
+                degraded=tuple(float(value) for value in series_payload["degraded"]),
+                stabilized=tuple(float(value) for value in series_payload["stabilized"]),
             )
-        }
-    }
+    return profiles
 
-    trace_samples = {
-        "trace-001": TraceSample(
-            service="checkout-service",
-            trace_id="trace-001",
-            spans=(
-                TraceSpan("checkout-service", "POST /checkout", 1620.0, "error"),
-                TraceSpan("pricing-service", "GET /price", 1495.0, "timeout"),
-                TraceSpan("orders-db", "SELECT cart", 14.0, "ok"),
-            ),
-            error="pricing timeout propagated to checkout",
-            duration_ms=1620.0,
-        ),
-        "trace-002": TraceSample(
-            service="checkout-service",
-            trace_id="trace-002",
-            spans=(
-                TraceSpan("checkout-service", "POST /checkout", 1510.0, "error"),
-                TraceSpan("pricing-service", "GET /price", 1488.0, "timeout"),
-            ),
-            error="upstream timeout contacting pricing-service",
-            duration_ms=1510.0,
-        ),
-    }
 
-    runbook_snippets = {
-        "checkout-service": {
-            "triage": (
-                "Check recent deploys before scaling the service.",
-                "Compare checkout config and feature flags when 5xx spikes after deploy.",
-            ),
-            "mitigation": (
-                "Rollback checkout or disable the new pricing path if pricing requests fail after deploy.",
-                "Restarting checkout may reduce noise but will not fix bad config.",
-            ),
-            "verification": (
-                "Confirm checkout error_rate and p95_latency recover after the mitigation.",
-                "Run a health check and verify pricing timeout symptoms subside.",
-            ),
-        },
-        "pricing-service": {
-            "triage": (
-                "If pricing CPU is stable but callers time out, inspect caller configuration first.",
-            ),
-            "mitigation": (
-                "Avoid scaling pricing until caller-side regressions are ruled out.",
-            ),
-            "verification": (
-                "Confirm timeout volume drops after caller remediation.",
-            ),
-        },
+def _scenario_from_payload(payload: dict[str, Any]) -> Scenario:
+    services = {
+        item["name"]: ServiceDefinition(
+            name=item["name"],
+            description=item["description"],
+            dependencies=tuple(item["dependencies"]),
+            owner=item["owner"],
+            initial_replicas=int(item.get("initial_replicas", 2)),
+        )
+        for item in payload["services"]
     }
-
-    help_responses = {
-        "db": "DB team reports connection pool and query latency are normal; no evidence of database saturation.",
-        "network": "Network team sees no packet loss between checkout and pricing; issue appears application-level.",
-        "pricing": "Pricing team sees caller timeouts from checkout and suggests validating checkout endpoint configuration.",
-        "platform": "Platform team suggests checking the most recent checkout deploy and diffing env vars before scaling.",
-    }
-
+    timeline_events = [
+        TimelineEvent(
+            step=int(event["step"]),
+            alerts=tuple(
+                AlertDefinition(
+                    id=alert["id"],
+                    service=alert["service"],
+                    signal=alert["signal"],
+                    active=bool(alert.get("active", True)),
+                )
+                for alert in event.get("alerts", [])
+            ),
+            messages=tuple(
+                MessageDefinition(
+                    ts_step=int(message["ts_step"]),
+                    sender=message["sender"],
+                    text=message["text"],
+                )
+                for message in event.get("messages", [])
+            ),
+        )
+        for event in payload["timeline_events"]
+    ]
+    evidence_payload = payload["evidence"]
     evidence = ScenarioEvidence(
         services=services,
-        degraded_metrics=degraded_metrics,
-        stabilized_metrics=stabilized_metrics,
-        logs_by_service=logs_by_service,
-        deploy_history=deploy_history,
-        config_diffs=config_diffs,
-        trace_samples=trace_samples,
-        runbook_snippets=runbook_snippets,
-        help_responses=help_responses,
+        metric_profiles=_metric_profiles_from_payload(evidence_payload["metrics"]),
+        logs_by_service={
+            service: tuple(
+                LogEntry(
+                    step=int(entry["step"]),
+                    service=entry["service"],
+                    level=entry["level"],
+                    message=entry["message"],
+                )
+                for entry in entries
+            )
+            for service, entries in evidence_payload["logs"].items()
+        },
+        deploy_history=tuple(
+            DeployEvent(
+                service=event["service"],
+                step=int(event["step"]),
+                from_version=event["from_version"],
+                to_version=event["to_version"],
+                author=event["author"],
+            )
+            for event in evidence_payload["deploy_history"]
+        ),
+        config_diffs=tuple(
+            ConfigDiffRecord(
+                service=record["service"],
+                from_version=record["from_version"],
+                to_version=record["to_version"],
+                diff=tuple(
+                    ConfigDiffEntry(
+                        key=entry["key"],
+                        from_value=entry["from"],
+                        to_value=entry["to"],
+                    )
+                    for entry in record["diff"]
+                ),
+            )
+            for record in evidence_payload["config_diffs"]
+        ),
+        trace_samples=tuple(
+            TraceSample(
+                service=sample["service"],
+                trace_id=sample["trace_id"],
+                spans=tuple(
+                    TraceSpan(
+                        service=span["service"],
+                        operation=span["operation"],
+                        duration_ms=float(span["duration_ms"]),
+                        status=span["status"],
+                    )
+                    for span in sample["spans"]
+                ),
+                error=sample.get("error"),
+                duration_ms=float(sample["duration_ms"]),
+            )
+            for sample in evidence_payload["trace_samples"]
+        ),
+        runbook_snippets={
+            service: {
+                section: tuple(lines)
+                for section, lines in sections.items()
+            }
+            for service, sections in evidence_payload["runbook_snippets"].items()
+        },
+        help_responses=dict(evidence_payload["help_responses"]),
+    )
+    mitigation_rules = tuple(
+        MitigationRule(
+            mitigation_id=rule["mitigation_id"],
+            action_type=rule["action_type"],
+            args_match=dict(rule["args_match"]),
+            causal=bool(rule["causal"]),
+            forbidden=bool(rule.get("forbidden", False)),
+        )
+        for rule in payload["mitigation_rules"]
+    )
+    rubric_payload = payload["resolution_rubric"]
+    resolution_rubric = ResolutionRubric(
+        required_evidence_flags=tuple(rubric_payload["required_evidence_flags"]),
+        required_updates=tuple(
+            UpdateRequirement(
+                template_id=requirement["template_id"],
+                audience=requirement["audience"],
+            )
+            for requirement in rubric_payload["required_updates"]
+        ),
+        required_verification=tuple(
+            VerificationRequirement(
+                service=requirement["service"],
+                metric=requirement["metric"],
+                target=float(requirement["target"]),
+                window_steps=int(requirement["window_steps"]),
+            )
+            for requirement in rubric_payload["required_verification"]
+        ),
+        min_investigation_categories=int(rubric_payload["min_investigation_categories"]),
+        create_incident_by=int(rubric_payload["create_incident_by"]),
+    )
+    return Scenario(
+        id=payload["id"],
+        title=payload["title"],
+        description=payload["description"],
+        severity=payload["severity"],
+        ground_truth_root_cause_id=payload["ground_truth_root_cause_id"],
+        allowed_mitigations=list(payload["allowed_mitigations"]),
+        safe_mitigations=list(payload["safe_mitigations"]),
+        forbidden_mitigations=list(payload["forbidden_mitigations"]),
+        all_mitigations=list(payload["all_mitigations"]),
+        patch_ids={
+            service: tuple(values)
+            for service, values in payload["patch_ids"].items()
+        },
+        feature_flags=dict(payload["feature_flags"]),
+        deploy_versions=dict(payload["deploy_versions"]),
+        config_versions=dict(payload["config_versions"]),
+        timeline_events=timeline_events,
+        evidence=evidence,
+        mitigation_rules=mitigation_rules,
+        causal_action_sets=tuple(tuple(group) for group in payload["causal_action_sets"]),
+        resolution_rubric=resolution_rubric,
+        evidence_markers=dict(payload["evidence_markers"]),
+        variant_of=payload.get("variant_of"),
+        variant_seed=payload.get("variant_seed"),
+        variant_ops=tuple(payload.get("variant_ops", [])),
     )
 
-    return Scenario(
-        id="svc-checkout-regression",
-        title="Checkout deploy regression with downstream pricing timeouts",
-        description=(
-            "checkout-service v42 introduced a malformed PRICING_URL configuration. "
-            "The resulting pricing call failures manifest as checkout 5xx errors, latency inflation, "
-            "and secondary pricing timeout alerts, with database and queue signals acting as distractors."
-        ),
-        severity="sev1",
-        ground_truth_root_cause_id="checkout_pricing_url_misconfigured_after_v42_deploy",
-        allowed_mitigations=[
-            "rollback_checkout_v42_to_v41",
-            "disable_new_pricing_path",
-            "revert_pricing_url_config",
-        ],
-        safe_mitigations=[
-            "rollback_checkout_v42_to_v41",
-            "disable_new_pricing_path",
-            "revert_pricing_url_config",
-            "restart_checkout_service",
-            "scale_checkout_service",
-        ],
-        forbidden_mitigations=[
-            "restart_database",
-            "scale_database",
-            "purge_queue",
-        ],
-        all_mitigations=[
-            "rollback_checkout_v42_to_v41",
-            "disable_new_pricing_path",
-            "revert_pricing_url_config",
-            "restart_checkout_service",
-            "scale_checkout_service",
-            "restart_database",
-            "scale_database",
-            "purge_queue",
-        ],
-        patch_ids={"checkout-service": ("fix_pricing_url_v42", "bump_retry_budget")},
-        feature_flags={"new_pricing_path": True},
-        deploy_versions={
-            "checkout-service": "v42",
-            "pricing-service": "v17",
-            "orders-db": "db-2026-03-08",
+
+def scenario_to_payload(scenario: Scenario) -> dict[str, Any]:
+    """Convert a Scenario dataclass into a JSON-serializable payload."""
+
+    payload = asdict(scenario)
+    services = []
+    for service in scenario.evidence.services.values():
+        services.append(
+            {
+                "name": service.name,
+                "description": service.description,
+                "dependencies": list(service.dependencies),
+                "owner": service.owner,
+                "initial_replicas": service.initial_replicas,
+            }
+        )
+    payload["services"] = services
+    evidence = payload.pop("evidence")
+    metrics_payload: dict[str, Any] = {}
+    for service, metric_map in scenario.evidence.metric_profiles.items():
+        metrics_payload[service] = {}
+        for metric_name, series in metric_map.items():
+            metrics_payload[service][metric_name] = {
+                "degraded": list(series.degraded),
+                "stabilized": list(series.stabilized),
+            }
+    evidence_payload = {
+        "metrics": metrics_payload,
+        "logs": {
+            service: [asdict(entry) for entry in entries]
+            for service, entries in scenario.evidence.logs_by_service.items()
         },
-        config_versions={
-            "checkout-service": "v42",
-            "pricing-service": "v17",
-            "orders-db": "db-2026-03-08",
-        },
-        timeline_events=[
-            TimelineEvent(
-                step=0,
-                alerts=(
-                    AlertDefinition("alert-checkout-error-rate", "checkout-service", "error_rate > 5%"),
-                    AlertDefinition("alert-checkout-p95-latency", "checkout-service", "p95_latency > 1200ms"),
-                    AlertDefinition("alert-pricing-timeouts", "pricing-service", "pricing_timeouts > baseline"),
-                ),
-                messages=(
-                    MessageDefinition(0, "deploy-bot", "checkout-service v42 deployment completed 4 minutes ago."),
-                ),
-            ),
-            TimelineEvent(
-                step=2,
-                messages=(
-                    MessageDefinition(2, "support", "Support says customers can't complete checkout."),
-                ),
-            ),
-            TimelineEvent(
-                step=6,
-                messages=(
-                    MessageDefinition(6, "manager", "Manager asks for ETA."),
-                ),
-            ),
+        "deploy_history": [asdict(entry) for entry in scenario.evidence.deploy_history],
+        "config_diffs": [
+            {
+                "service": record.service,
+                "from_version": record.from_version,
+                "to_version": record.to_version,
+                "diff": [
+                    {"key": entry.key, "from": entry.from_value, "to": entry.to_value}
+                    for entry in record.diff
+                ],
+            }
+            for record in scenario.evidence.config_diffs
         ],
-        evidence=evidence,
-    )
+        "trace_samples": [asdict(sample) for sample in scenario.evidence.trace_samples],
+        "runbook_snippets": {
+            service: {section: list(lines) for section, lines in sections.items()}
+            for service, sections in scenario.evidence.runbook_snippets.items()
+        },
+        "help_responses": dict(scenario.evidence.help_responses),
+    }
+    payload["evidence"] = evidence_payload
+    payload["timeline_events"] = [
+        {
+            "step": event.step,
+            "alerts": [asdict(alert) for alert in event.alerts],
+            "messages": [asdict(message) for message in event.messages],
+        }
+        for event in scenario.timeline_events
+    ]
+    payload["mitigation_rules"] = [
+        {
+            "mitigation_id": rule.mitigation_id,
+            "action_type": rule.action_type,
+            "args_match": dict(rule.args_match),
+            "causal": rule.causal,
+            "forbidden": rule.forbidden,
+        }
+        for rule in scenario.mitigation_rules
+    ]
+    payload["causal_action_sets"] = [list(group) for group in scenario.causal_action_sets]
+    payload["resolution_rubric"] = {
+        "required_evidence_flags": list(scenario.resolution_rubric.required_evidence_flags),
+        "required_updates": [
+            asdict(requirement) for requirement in scenario.resolution_rubric.required_updates
+        ],
+        "required_verification": [
+            asdict(requirement) for requirement in scenario.resolution_rubric.required_verification
+        ],
+        "min_investigation_categories": scenario.resolution_rubric.min_investigation_categories,
+        "create_incident_by": scenario.resolution_rubric.create_incident_by,
+    }
+    payload["evidence_markers"] = dict(scenario.evidence_markers)
+    return payload
+
+
+def load_base_scenarios() -> list[Scenario]:
+    """Load all base scenarios from disk."""
+
+    scenarios = [
+        _scenario_from_payload(_load_payload(path))
+        for path in sorted(SCENARIOS_DIR.glob("*.json"))
+    ]
+    if not scenarios:
+        raise FileNotFoundError(f"No scenarios found in {SCENARIOS_DIR}")
+    return scenarios
+
+
+def load_scenario(scenario_id: str | None = None) -> Scenario:
+    """Load one base scenario by id, defaulting to the first scenario."""
+
+    scenarios = load_base_scenarios()
+    if scenario_id is None:
+        return scenarios[0]
+    for scenario in scenarios:
+        if scenario.id == scenario_id:
+            return scenario
+    raise KeyError(f"Unknown scenario_id: {scenario_id}")
