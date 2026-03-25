@@ -1,2 +1,8 @@
 __pycache__/
 .pytest_cache/
+.venv/
+tmp_eval/
+eval_artifacts/
+eval_artifacts_check/
+replays/
+*.egg-info/
