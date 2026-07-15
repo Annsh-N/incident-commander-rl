@@ -1,4 +1,4 @@
-"""Shared action schemas and constants for Stage 2."""
+"""Action schema definitions for the incident environment."""
 
 from __future__ import annotations
 

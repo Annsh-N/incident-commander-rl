@@ -1,4 +1,4 @@
-"""Deterministic tool simulators for Stage 3."""
+"""Deterministic incident-investigation tool simulators."""
 
 from __future__ import annotations
 

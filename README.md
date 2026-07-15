@@ -1,51 +1,59 @@
 # Incident Commander RL Environment
 
-This project is a reinforcement learning environment for real-world incident response work. Instead of treating operations like a toy control problem, it models the actual flow of handling production issues: triaging what is broken, making sense of noisy signals, choosing a mitigation that matches the situation, verifying that users are no longer impacted, and communicating clearly while the system recovers.
+Incident Commander is a deterministic RL-style environment for evaluating agents
+on production incident response. It models the operational loop an engineer
+would follow during an outage: inspect noisy signals, gather evidence, choose a
+safe mitigation, wait for the system to stabilize, verify recovery, and
+communicate status before declaring the incident resolved.
 
-The scenarios are built around the kinds of failures software teams see in practice: a bad deploy that breaks checkout, exhausted database connections under burst traffic, queue backlogs, dependency outages, retry storms, DNS mistakes, memory leaks, and permission regressions. The point is not to reward an agent for guessing a hidden label. The point is to evaluate whether it can behave like a competent engineer under pressure.
+The environment is synthetic, but the scenarios are based on common production
+failure modes: bad deploys, database connection exhaustion, queue backlogs,
+partial dependency outages, memory leaks, DNS mistakes, retry storms, and
+permission regressions.
 
-## Why this exists
+## At a Glance
 
-If you want to train or evaluate agents for engineering work, they need environments that look more like production than like a game. In a real incident, the agent has to gather evidence, coordinate updates, choose a concrete change, wait for the system to settle, and prove the service is healthy before calling the issue resolved. That is the standard this environment is built around.
+| Capability | Current state |
+| --- | --- |
+| Base scenarios | 8 production-inspired incidents |
+| Seeded variants | 40 variants with `--variants 5` |
+| Action surface | 24 typed actions |
+| Validation | Strict action schemas and scenario-specific checks |
+| Replay | Deterministic JSONL episode logs |
+| CLI | `play`, `suite`, and `replay` commands |
+| Baselines | Random and structured heuristic agents |
+| Tests | 8 passing tests |
+
+## Why This Exists
+
+Most agent benchmarks do not look like real engineering work. In an incident,
+the agent must handle partial evidence, avoid risky actions, communicate with
+humans, and prove the service is healthy before calling the issue resolved.
+This project makes those requirements explicit and reproducible.
 
 The repository includes:
 
-- a deterministic Gymnasium-style environment API
-- eight deep base incident scenarios with seeded variants
-- strict action validation and resolution gating
-- an interactive CLI for stepping through incidents by hand
-- a benchmark harness with baseline agents
+- a Gymnasium-inspired `reset(seed)` / `step(action)` API;
+- eight deep incident scenarios with deterministic seeded variants;
+- strict action validation and resolution gating;
+- an interactive CLI for stepping through incidents by hand;
+- a benchmark harness with baseline agents;
+- JSONL replay logs for failed or interesting episodes.
 
-## Requirements
+## Setup
+
+Requirements:
 
 - Python `3.10+`
 - `pip`
-
-If you are on macOS and your default `python3` is older, install a newer version first. Homebrew is the easiest path:
-
-```bash
-brew install python@3.12
-```
-
-If you want `python3` to refer to that install in new shells, add:
-
-```bash
-export PATH="/usr/local/opt/python@3.12/libexec/bin:$PATH"
-```
-
-to your `~/.zshrc`, then reload your shell.
-
-## Setup
 
 From the repository root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -V
-python -m ensurepip --upgrade
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e ".[test]"
 ```
 
 After install, the CLI should be available:
@@ -54,10 +62,16 @@ After install, the CLI should be available:
 ic --help
 ```
 
-## Run tests
+Run tests:
 
 ```bash
 pytest -q
+```
+
+Expected result:
+
+```text
+8 passed
 ```
 
 ## Quickstart
@@ -74,65 +88,76 @@ Run the evaluation suite with the heuristic baseline:
 ic suite --agent heuristic --seed 0 --variants 5 --out eval_artifacts
 ```
 
+Run both baselines and print a Markdown results table:
+
+```bash
+python scripts/benchmark.py --seed 0 --variants 5 --out benchmark_results
+```
+
 Step through a saved run:
 
 ```bash
 ic replay eval_artifacts/failed_replays/<file>.jsonl
 ```
 
-If you have not installed the console script yet, you can run the CLI directly:
+## Benchmark Results
+
+These results were measured locally with:
 
 ```bash
-python -m incident_commander_env.cli play --scenario svc-checkout-regression --seed 0
+ic suite --agent random --seed 0 --variants 5 --out eval_artifacts/random
+ic suite --agent heuristic --seed 0 --variants 5 --out eval_artifacts/heuristic
+python scripts/benchmark.py --seed 0 --variants 25 --out benchmark_results
 ```
 
-## What it trains or evaluates
+| Agent | Episodes | Pass rate | Avg successful steps | Runtime |
+| --- | ---: | ---: | ---: | ---: |
+| RandomAgent | 48 | 0.0% | - | ~0.38s |
+| HeuristicAgent | 48 | 62.5% | 15.0 | ~0.47s |
+| RandomAgent | 208 | 0.0% | - | ~1.70s |
+| HeuristicAgent | 208 | 62.5% | 15.0 | ~2.07s |
 
-Agents in this environment are expected to do the kinds of things an on-call engineer or incident commander would do in a live production issue:
+The heuristic baseline is intentionally transparent: it uses structured
+observations and public scenario hints exposed by the environment. Treat these
+numbers as a reproducibility and scenario-difficulty check, not as model
+accuracy.
 
-- identify which service is likely at fault
-- investigate using metrics, logs, traces, deploy history, and config changes
-- choose a mitigation that actually matches the evidence
-- avoid risky or irrelevant actions that make the incident worse
-- verify that the service has recovered before declaring success
-- communicate progress as the incident unfolds
+## Environment Contract
 
-In other words, this environment is less about memorizing a solution and more about practicing disciplined operational judgment.
+The environment follows a small RL-style contract:
 
-## CLI overview
+```python
+observation = env.reset(seed=0)
+observation, reward, done, info = env.step(action)
+```
 
-`ic play --scenario <id> --seed <int>`
+Actions are JSON-like dictionaries:
 
-- Starts an interactive incident session.
-- Shows the current state, available actions, and action argument schemas.
-- Accepts either raw JSON actions or a numbered action selection.
+```python
+{"type": "get_logs", "args": {"service": "checkout-service", "query": "timeout", "window_steps": 5, "limit": 10, "page": 0}}
+```
 
-`ic suite --agent random|heuristic --seed <int> --variants <int> --out <dir>`
+Resolution is strict. A successful episode requires enough investigation,
+evidence, a concrete mitigation, a wait for stabilization, metric verification,
+and required communication updates. See `docs/ENVIRONMENT.md` for the full
+contract.
 
-- Runs a deterministic benchmark over the scenario suite.
-- Prints pass rates, average resolution steps, and common failure reasons.
-- Writes failed runs and a summary file to the output directory.
-
-`ic replay <path_to_jsonl>`
-
-- Opens a saved episode and lets you walk through it step by step.
-
-## Base scenarios
+## Base Scenarios
 
 The current scenario pack includes:
 
-- deploy regression caused by a bad downstream endpoint config
-- database connection exhaustion during traffic spikes
-- queue backlog with downstream timeout pressure
-- partial dependency outage requiring graceful degradation
-- memory leak after deploy
-- DNS / networking misconfiguration
-- thundering herd from aggressive retry behavior
-- permission failure after a security policy change
+- deploy regression caused by a bad downstream endpoint config;
+- database connection exhaustion during traffic spikes;
+- queue backlog with downstream timeout pressure;
+- partial dependency outage requiring graceful degradation;
+- memory leak after deploy;
+- DNS / networking misconfiguration;
+- thundering herd from aggressive retry behavior;
+- permission failure after a security policy change.
 
-## Project structure
+## Project Structure
 
-The main package lives in `incident_commander_env/`. The most important pieces are:
+The main package lives in `incident_commander_env/`.
 
 - `env.py`: environment state and step logic
 - `scenario.py`: scenario loading and public scenario metadata
@@ -142,8 +167,17 @@ The main package lives in `incident_commander_env/`. The most important pieces a
 - `scorer.py`: deterministic reward shaping and resolution checks
 - `cli.py`: interactive CLI and benchmark entrypoint
 
-## Notes
+Additional docs:
 
-- The environment is deterministic under seed.
-- Episodes are capped at 25 steps.
-- Resolution is intentionally strict: investigation alone is not enough, and mitigation alone is not enough. The agent has to prove the system recovered.
+- `docs/ENVIRONMENT.md`: observation, action, reward, and termination contract
+- `docs/BENCHMARKS.md`: benchmark commands, results, and interpretation
+- `docs/SCENARIO_AUTHORING.md`: how to add scenarios safely
+
+## Limitations
+
+- The incidents are synthetic and are not connected to live telemetry.
+- Baselines are deterministic policies, not trained RL agents.
+- The current API is Gymnasium-inspired, but this package does not yet expose a
+  full `gymnasium.Env` adapter with spaces.
+- Structured hints are exposed intentionally so baseline behavior is
+  reproducible and easy to inspect.

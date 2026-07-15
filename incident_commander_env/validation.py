@@ -1,4 +1,4 @@
-"""Action validation logic for Stage 3."""
+"""Action validation logic for incident-response episodes."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _is_float_like(value: Any) -> bool:
 
 
 def validate_action(action: dict[str, Any], env_state: Any) -> tuple[bool, str | None]:
-    """Validate an action against the strict Stage 3 schema."""
+    """Validate an action against the strict incident action schema."""
 
     if not isinstance(action, dict):
         return False, "action must be a dict"

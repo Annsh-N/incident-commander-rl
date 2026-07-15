@@ -105,7 +105,7 @@ class EnvState:
 
 
 class IncidentCommanderEnv:
-    """Deterministic RL environment with a Gymnasium-like API."""
+    """Deterministic incident-response environment with an RL-style API."""
 
     def __init__(self, max_steps: int = 25, scenario: Scenario | None = None) -> None:
         self.max_steps = max_steps

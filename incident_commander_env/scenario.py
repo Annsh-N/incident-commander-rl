@@ -1,4 +1,4 @@
-"""Scenario loading, aliases, and public hints for Stage 3."""
+"""Scenario loading, aliases, and public hints."""
 
 from __future__ import annotations
 

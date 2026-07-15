@@ -1,4 +1,4 @@
-"""Dense deterministic scoring for Stage 3."""
+"""Reward and termination logic for incident-resolution episodes."""
 
 from __future__ import annotations
 

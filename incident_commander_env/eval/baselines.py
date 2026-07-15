@@ -1,4 +1,4 @@
-"""Baseline agents for the Stage 3 evaluation harness."""
+"""Baseline agents for incident-response evaluation."""
 
 from __future__ import annotations
 
