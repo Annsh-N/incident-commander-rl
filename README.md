@@ -1,15 +1,14 @@
-# Incident Commander RL Environment
+# Incident Commander Environment
 
-Incident Commander is a deterministic RL-style environment for evaluating agents
-on production incident response. It models the operational loop an engineer
+Incident Commander is a deterministic environment for evaluating agents on
+production-style incident response. It models the operational loop an engineer
 would follow during an outage: inspect noisy signals, gather evidence, choose a
 safe mitigation, wait for the system to stabilize, verify recovery, and
 communicate status before declaring the incident resolved.
 
-The environment is synthetic, but the scenarios are based on common production
-failure modes: bad deploys, database connection exhaustion, queue backlogs,
-partial dependency outages, memory leaks, DNS mistakes, retry storms, and
-permission regressions.
+The scenario pack covers common failure modes: bad deploys, database connection
+exhaustion, queue backlogs, partial dependency outages, memory leaks, DNS
+mistakes, retry storms, and permission regressions.
 
 ## At a Glance
 
@@ -33,7 +32,7 @@ This project makes those requirements explicit and reproducible.
 
 The repository includes:
 
-- a Gymnasium-inspired `reset(seed)` / `step(action)` API;
+- a small `reset(seed)` / `step(action)` API;
 - eight deep incident scenarios with deterministic seeded variants;
 - strict action validation and resolution gating;
 - an interactive CLI for stepping through incidents by hand;
@@ -117,14 +116,12 @@ python scripts/benchmark.py --seed 0 --variants 25 --out benchmark_results
 | RandomAgent | 208 | 0.0% | - | ~1.70s |
 | HeuristicAgent | 208 | 62.5% | 15.0 | ~2.07s |
 
-The heuristic baseline is intentionally transparent: it uses structured
-observations and public scenario hints exposed by the environment. Treat these
-numbers as a reproducibility and scenario-difficulty check, not as model
-accuracy.
+The heuristic baseline is deterministic and inspectable. These numbers provide
+a reproducible scenario-difficulty check for future agents.
 
 ## Environment Contract
 
-The environment follows a small RL-style contract:
+The environment follows a compact agent-environment contract:
 
 ```python
 observation = env.reset(seed=0)
@@ -172,12 +169,3 @@ Additional docs:
 - `docs/ENVIRONMENT.md`: observation, action, reward, and termination contract
 - `docs/BENCHMARKS.md`: benchmark commands, results, and interpretation
 - `docs/SCENARIO_AUTHORING.md`: how to add scenarios safely
-
-## Limitations
-
-- The incidents are synthetic and are not connected to live telemetry.
-- Baselines are deterministic policies, not trained RL agents.
-- The current API is Gymnasium-inspired, but this package does not yet expose a
-  full `gymnasium.Env` adapter with spaces.
-- Structured hints are exposed intentionally so baseline behavior is
-  reproducible and easy to inspect.
